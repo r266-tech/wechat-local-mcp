@@ -33,13 +33,15 @@ type xmlTransferMsg struct {
 }
 
 // TransferInfo extracts (amount, description, memo) from a transfer message
-// XML. Returns empty strings on parse failure.
-func TransferInfo(content string) (amount, des, memo string) {
+// XML. Returns a non-nil error on parse failure so callers can distinguish
+// "no transfer payload in this message" (all fields empty, err nil) from
+// "parser drifted on this WeChat schema" (err set).
+func TransferInfo(content string) (amount, des, memo string, err error) {
 	var t xmlTransferMsg
-	if err := xml.Unmarshal([]byte(StripMsgPrefix(content)), &t); err != nil {
+	if err = xml.Unmarshal([]byte(StripMsgPrefix(content)), &t); err != nil {
 		return
 	}
-	return t.AppMsg.WcPayInfo.FeeDesc, t.AppMsg.Des, t.AppMsg.WcPayInfo.PayMemo
+	return t.AppMsg.WcPayInfo.FeeDesc, t.AppMsg.Des, t.AppMsg.WcPayInfo.PayMemo, nil
 }
 
 // xmlRedPacketMsg parses wechat red-packet (subtype=2001) messages.
@@ -60,12 +62,13 @@ type xmlRedPacketMsg struct {
 }
 
 // RedPacketInfo extracts (wishing, sceneText) from a red-packet XML.
-func RedPacketInfo(content string) (wishing, sceneText string) {
+// Non-nil err = parser drift; empty fields with nil err = legitimately absent.
+func RedPacketInfo(content string) (wishing, sceneText string, err error) {
 	var r xmlRedPacketMsg
-	if err := xml.Unmarshal([]byte(StripMsgPrefix(content)), &r); err != nil {
+	if err = xml.Unmarshal([]byte(StripMsgPrefix(content)), &r); err != nil {
 		return
 	}
-	return r.AppMsg.WcPayInfo.SenderTitle, r.AppMsg.WcPayInfo.SceneText
+	return r.AppMsg.WcPayInfo.SenderTitle, r.AppMsg.WcPayInfo.SceneText, nil
 }
 
 // xmlFavItem covers the most common favorite XML shapes (link / note / data).
@@ -88,19 +91,19 @@ type xmlFavItem struct {
 }
 
 // FavoriteInfo extracts (title, description, url) from a favorite XML.
-// Picks whichever inner item shape is populated.
-func FavoriteInfo(content string) (title, desc, url string) {
+// Picks whichever inner item shape is populated. Non-nil err = parser drift.
+func FavoriteInfo(content string) (title, desc, url string, err error) {
 	var f xmlFavItem
-	if err := xml.Unmarshal([]byte(content), &f); err != nil {
+	if err = xml.Unmarshal([]byte(content), &f); err != nil {
 		return
 	}
 	switch {
 	case f.WebURLItem.PageTitle != "":
-		return f.WebURLItem.PageTitle, f.WebURLItem.PageDesc, f.WebURLItem.CleanURL
+		return f.WebURLItem.PageTitle, f.WebURLItem.PageDesc, f.WebURLItem.CleanURL, nil
 	case f.NoteItem.Title != "":
-		return f.NoteItem.Title, f.NoteItem.Description, ""
+		return f.NoteItem.Title, f.NoteItem.Description, "", nil
 	case f.DataItem.DataTitle != "":
-		return f.DataItem.DataTitle, f.DataItem.DataDesc, ""
+		return f.DataItem.DataTitle, f.DataItem.DataDesc, "", nil
 	}
 	return
 }
@@ -162,35 +165,43 @@ type ForwardItem struct {
 	SrcMsgLocalID    int64         `json:"src_msg_localid,omitempty"`
 	SrcMsgCreateTime int64         `json:"src_msg_create_time,omitempty"`
 	NestedItems      []ForwardItem `json:"nested_items,omitempty"`
+	// ParseError surfaces nested-forward (datatype=17) parse failure on this
+	// item without losing the rest of the outer forward. Outer-XML parser
+	// drift propagates as ForwardItems' returned error instead.
+	ParseError string `json:"parse_error,omitempty"`
 }
 
 // ForwardItems extracts structured sub-messages from a forward_chat (subtype=19)
 // XML. depth bounds nested-forward recursion (pass ≥1 to include nested; 0
-// keeps datatype=17 items but without NestedItems). Returns nil on parse
-// failure or when the message is not a forward. Binary/media payloads
-// (cdndataurl / aeskey) are intentionally dropped — encrypted CDN pointers
-// unusable without the WeChat client.
-func ForwardItems(content string, depth int) []ForwardItem {
+// keeps datatype=17 items but without NestedItems). Non-nil err = parser drift.
+// Empty slice with nil err = legitimately not a forward / empty datalist.
+// Binary/media payloads (cdndataurl / aeskey) are intentionally dropped —
+// encrypted CDN pointers unusable without the WeChat client.
+func ForwardItems(content string, depth int) ([]ForwardItem, error) {
 	var m xmlForwardMsg
 	if err := xml.Unmarshal([]byte(StripMsgPrefix(content)), &m); err != nil {
-		return nil
+		return nil, err
 	}
 	inner := strings.TrimSpace(m.AppMsg.RecordItem)
 	if inner == "" {
-		return nil
+		return nil, nil
 	}
 	return parseRecordInfo(inner, depth)
 }
 
 // parseRecordInfo unmarshals a <recordinfo> XML document into a flat slice of
 // ForwardItem, recursing into nested forwards (datatype=17) up to depth.
-func parseRecordInfo(recordXML string, depth int) []ForwardItem {
+// Non-nil err = this <recordinfo> XML failed to parse (parser drift on the
+// document itself). Nested-forward parse failures don't fail outer; they're
+// recorded as ParseError on the offending item so the rest of the outer list
+// survives.
+func parseRecordInfo(recordXML string, depth int) ([]ForwardItem, error) {
 	var ri xmlForwardRecordInfo
 	if err := xml.Unmarshal([]byte(recordXML), &ri); err != nil {
-		return nil
+		return nil, err
 	}
 	if len(ri.DataItems) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]ForwardItem, 0, len(ri.DataItems))
 	for _, it := range ri.DataItems {
@@ -208,12 +219,17 @@ func parseRecordInfo(recordXML string, depth int) []ForwardItem {
 		}
 		if it.DataType == 17 && depth > 0 {
 			if nested := extractNestedRecordInfo(it.RawInner); nested != "" {
-				fi.NestedItems = parseRecordInfo(nested, depth-1)
+				items, err := parseRecordInfo(nested, depth-1)
+				if err != nil {
+					fi.ParseError = err.Error()
+				} else {
+					fi.NestedItems = items
+				}
 			}
 		}
 		out = append(out, fi)
 	}
-	return out
+	return out, nil
 }
 
 // extractNestedRecordInfo scans a dataitem's inner XML for the first

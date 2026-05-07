@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config is wx-mcp's persistent state (~/.config/wxcli/config.json).
@@ -108,6 +109,8 @@ func AutoDetectDBRoot() (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("WeChat data dir not found at %s (is WeChat 4.x installed and logged in?): %w", base, err)
 	}
+	type cand struct{ full, wxid string }
+	var cands []cand
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -123,10 +126,22 @@ func AutoDetectDBRoot() (string, string, error) {
 			if idx := lastIndex(name, "_"); idx > 0 {
 				wxid = name[:idx]
 			}
-			return full, wxid, nil
+			cands = append(cands, cand{full, wxid})
 		}
 	}
-	return "", "", fmt.Errorf("no account directory with db_storage found under %s", base)
+	switch len(cands) {
+	case 0:
+		return "", "", fmt.Errorf("no account directory with db_storage found under %s", base)
+	case 1:
+		return cands[0].full, cands[0].wxid, nil
+	}
+	// Multi-account host: refuse to guess. Picking the wrong account would
+	// silently expose a different user's chats to the LLM.
+	var lines []string
+	for _, c := range cands {
+		lines = append(lines, fmt.Sprintf("  %s  (wxid=%s)", c.full, c.wxid))
+	}
+	return "", "", fmt.Errorf("multiple WeChat accounts found under %s — refusing to autodetect.\nCandidates:\n%s\nRerun with explicit selection: `wxkey setup --root <full-path-above>`", base, strings.Join(lines, "\n"))
 }
 
 func lastIndex(s, sep string) int {

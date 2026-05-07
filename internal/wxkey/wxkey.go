@@ -87,7 +87,10 @@ func RunSetup() (*SetupResult, string, error) {
 	}
 	var res SetupResult
 	if err := json.Unmarshal(payload, &res); err != nil {
-		return nil, stderr.String(), fmt.Errorf("parse wxkey setup output: %w (stdout: %s)", err, string(stdout))
+		// stdout contains key_hex on the success path; never echo it back through
+		// an error message that may surface to LLM clients. Diagnose by re-running
+		// `wxkey setup` directly in a terminal.
+		return nil, stderr.String(), fmt.Errorf("parse wxkey setup output: %w (stdout %d bytes; rerun `wxkey setup` directly to inspect)", err, len(stdout))
 	}
 	res.Keys = make(map[string]string, len(res.Results))
 	for _, r := range res.Results {

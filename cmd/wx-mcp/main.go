@@ -152,14 +152,38 @@ func (s *server) openDB(subdir, file string) (*wcdb.DB, error) {
 	if err := wcdb.Bootstrap(s.wcdbPath); err != nil {
 		return nil, err
 	}
-	dbPath := filepath.Join(s.cfg.DBRoot, "db_storage", subdir, file)
+	dbStorage := filepath.Join(s.cfg.DBRoot, "db_storage")
+	dbPath := filepath.Clean(filepath.Join(dbStorage, subdir, file))
+	// Containment layer 1 (lexical): catch obvious `..` / absolute escape before
+	// any FS call. Defense in depth — readonly is not a scope.
+	rel, err := filepath.Rel(dbStorage, dbPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("path escapes db_storage: subdir=%q file=%q", subdir, file)
+	}
+	// Containment layer 2 (resolved): catch symlink escape — a planted symlink
+	// under db_storage could point anywhere on disk and lexical check wouldn't
+	// see it. EvalSymlinks both ends and re-check rel against resolved root.
+	resolvedStorage, err := filepath.EvalSymlinks(dbStorage)
+	if err != nil {
+		return nil, fmt.Errorf("resolve db_storage: %w", err)
+	}
+	resolvedDB, err := filepath.EvalSymlinks(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve db path: %w", err)
+	}
+	relReal, err := filepath.Rel(resolvedStorage, resolvedDB)
+	if err != nil || strings.HasPrefix(relReal, "..") || filepath.IsAbs(relReal) {
+		return nil, fmt.Errorf("path escapes db_storage after symlink resolution: subdir=%q file=%q", subdir, file)
+	}
+	// Pass resolvedDB (real path) to wcdb so the file we validated is the file
+	// that gets opened — closes any TOCTOU window between check and open.
 	if len(s.cfg.Keys) > 0 {
 		// Prefer schema-2 enc_key per salt; fall back to legacy master password
 		// for DBs whose key didn't land in WeChat's heap during the scan.
-		return wcdb.OpenWithKeyMap(dbPath, s.cfg.Keys, s.cfg.Key)
+		return wcdb.OpenWithKeyMap(resolvedDB, s.cfg.Keys, s.cfg.Key)
 	}
 	// Pure schema-1 (legacy) — slow PBKDF2 on every open.
-	return wcdb.Open(dbPath, s.cfg.Key)
+	return wcdb.Open(resolvedDB, s.cfg.Key)
 }
 
 // msgShardRE matches message / biz_message shard filenames.
@@ -227,8 +251,12 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 	case "initialize":
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities":   map[string]any{"tools": map[string]any{}},
-			"serverInfo":     map[string]any{"name": "wx-mcp", "version": "1.3.1"},
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.1"},
+			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
+				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
+				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +
+				"- Freshness check: `sessions limit=1`, compare `last_timestamp` to now. Stale by hours = WeChat likely not running.",
 		}}
 	case "tools/list":
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": toolDefs}}
@@ -713,6 +741,9 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 	if mode == "" {
 		mode = "lite"
 	}
+	if mode != "lite" && mode != "full" {
+		return nil, fmt.Errorf("invalid fields=%q: must be \"lite\" or \"full\"", mode)
+	}
 	return liteMessages(rows, mode), nil
 }
 
@@ -862,7 +893,16 @@ func (s *server) toolSns(a map[string]any) (any, error) {
 	skip := offset
 	for _, r := range rows {
 		raw, _ := r["content"].(string)
-		p := parseSnsXML(raw)
+		p, perr := parseSnsXML(raw)
+		if perr != nil {
+			// Surface parser drift instead of silently skipping. Counts toward
+			// limit so the agent sees the failure in the same window it asked for.
+			posts = append(posts, &snsPost{ParseError: perr.Error()})
+			if len(posts) >= limit {
+				break
+			}
+			continue
+		}
 		if p == nil {
 			continue
 		}
@@ -886,9 +926,22 @@ func (s *server) toolSns(a map[string]any) (any, error) {
 
 	if len(posts) > 0 {
 		likes, comments := loadSnsInteractions(db, tids)
-		for i, tid := range tids {
-			posts[i].Likes = likes[tid]
-			posts[i].Comments = comments[tid]
+		// Assign by walking posts in order, advancing tid index only on valid
+		// posts. Parallel-slice indexing breaks when a parse-error post slips
+		// into `posts` without a corresponding tid in `tids` — would attach
+		// likes/comments to the wrong post (silent SNS data corruption).
+		ti := 0
+		for _, p := range posts {
+			if p.ParseError != "" {
+				continue
+			}
+			if ti >= len(tids) {
+				break
+			}
+			tid := tids[ti]
+			p.Likes = likes[tid]
+			p.Comments = comments[tid]
+			ti++
 		}
 		s.attachSnsAvatars(posts)
 	}
@@ -1091,7 +1144,11 @@ func (s *server) toolTransfers(a map[string]any) (any, error) {
 		if !ok {
 			continue
 		}
-		amount, des, memo := wxparse.TransferInfo(c)
+		amount, des, memo, err := wxparse.TransferInfo(c)
+		if err != nil {
+			r["parse_error"] = err.Error()
+			continue
+		}
 		if amount != "" {
 			r["amount"] = amount
 		}
@@ -1132,7 +1189,11 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 		if !ok {
 			continue
 		}
-		wishing, sceneText := wxparse.RedPacketInfo(c)
+		wishing, sceneText, err := wxparse.RedPacketInfo(c)
+		if err != nil {
+			r["parse_error"] = err.Error()
+			continue
+		}
 		if wishing != "" {
 			r["wishing"] = wishing
 		}
@@ -1190,7 +1251,10 @@ func (s *server) toolFavorites(a map[string]any) (any, error) {
 		r["favorite_type"] = wxkind.FavKind(ti)
 		delete(r, "type_id")
 		if c, ok := r["content"].(string); ok && c != "" {
-			if title, desc, url := wxparse.FavoriteInfo(c); title != "" || desc != "" || url != "" {
+			title, desc, url, perr := wxparse.FavoriteInfo(c)
+			if perr != nil {
+				r["parse_error"] = perr.Error()
+			} else if title != "" || desc != "" || url != "" {
 				if title != "" {
 					r["title"] = title
 				}
@@ -1606,6 +1670,7 @@ type snsPost struct {
 	Location   *snsLoc    `json:"location,omitempty"`
 	Likes      []snsReact `json:"likes,omitempty"`
 	Comments   []snsCmt   `json:"comments,omitempty"`
+	ParseError string     `json:"parse_error,omitempty"`
 }
 type snsMedia struct {
 	Type   string `json:"type"`
@@ -1632,10 +1697,10 @@ type snsCmt struct {
 	ReplyToNick string `json:"reply_to_nick,omitempty"`
 }
 
-func parseSnsXML(raw string) *snsPost {
+func parseSnsXML(raw string) (*snsPost, error) {
 	var item xmlSnsDataItem
-	if xml.Unmarshal([]byte(raw), &item) != nil {
-		return nil
+	if err := xml.Unmarshal([]byte(raw), &item); err != nil {
+		return nil, err
 	}
 	t := item.Timeline
 	p := &snsPost{
@@ -1658,7 +1723,7 @@ func parseSnsXML(raw string) *snsPost {
 	if lat != 0 || lon != 0 || t.Location.Name != "" {
 		p.Location = &snsLoc{Name: t.Location.Name, Lat: lat, Lon: lon}
 	}
-	return p
+	return p, nil
 }
 
 func loadSnsInteractions(db *wcdb.DB, tids []int64) (map[int64][]snsReact, map[int64][]snsCmt) {
@@ -1811,8 +1876,10 @@ func stripMsgPrefix(raw string) string {
 }
 
 // parseMessageContent returns a structured JSON-serializable value for supported
-// (base_kind, subtype). Returns nil for unsupported kinds or parse failures —
-// raw message_content is always retained in the row so no information is lost.
+// (base_kind, subtype). Returns nil for unsupported kinds; for known kinds whose
+// XML failed to parse, returns {"parse_error": ...} so agents can distinguish
+// "no data" from "parser drifted" (e.g. WeChat schema bumped). Raw
+// message_content is always retained in the row so no information is lost.
 // Depth bounds recursion for nested refermsg content.
 func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 	if depth <= 0 || raw == "" {
@@ -1822,8 +1889,8 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 	switch baseKind {
 	case 3:
 		var m xmlMsgImg
-		if xml.Unmarshal([]byte(xmlStr), &m) != nil {
-			return nil
+		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
+			return map[string]any{"parse_error": err.Error(), "kind": "image"}
 		}
 		return map[string]any{
 			"md5":           m.Img.MD5,
@@ -1840,8 +1907,8 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 		}
 	case 47:
 		var m xmlMsgEmoji
-		if xml.Unmarshal([]byte(xmlStr), &m) != nil {
-			return nil
+		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
+			return map[string]any{"parse_error": err.Error(), "kind": "emoji"}
 		}
 		return map[string]any{
 			"aeskey":      m.Emoji.AesKey,
@@ -1854,8 +1921,8 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 		}
 	case 49:
 		var m xmlMsgAppmsg
-		if xml.Unmarshal([]byte(xmlStr), &m) != nil {
-			return nil
+		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
+			return map[string]any{"parse_error": err.Error(), "kind": "app"}
 		}
 		out := map[string]any{
 			"app_subtype": m.AppMsg.Type,
@@ -1864,7 +1931,10 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 			"url":         m.AppMsg.URL,
 		}
 		if subtype == 19 {
-			if items := wxparse.ForwardItems(raw, depth); len(items) > 0 {
+			items, err := wxparse.ForwardItems(raw, depth)
+			if err != nil {
+				out["forward_items_parse_error"] = err.Error()
+			} else if len(items) > 0 {
 				out["forward_items"] = items
 			}
 		}
