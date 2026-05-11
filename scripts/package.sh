@@ -18,7 +18,7 @@ if [[ ! -f "$DYLIB_SRC" ]]; then
 fi
 
 WXKEY_SRC="${WXKEY_SRC:-$SRCDIR/../wxkey}"
-WXKEY_GO_INSTALL="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2}"
+WXKEY_GO_INSTALL="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.3}"
 
 DIST="$SRCDIR/dist/wx-mcp-v${VERSION}-darwin-arm64"
 rm -rf "$DIST" && mkdir -p "$DIST"

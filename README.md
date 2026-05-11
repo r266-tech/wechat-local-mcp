@@ -38,7 +38,7 @@ cd wx-mcp
 WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./install.sh --all --yes --json
 ```
 
-release zip 场景会直接复制包内 `wx-mcp` / `wxkey` / `libWCDB.dylib`. 源码 clone 场景会优先 `go build`; 如果本地没有 wxkey 源码或二进制, installer 会用 Go 从 `github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2` 安装 companion CLI.
+release zip 场景会直接复制包内 `wx-mcp` / `wxkey` / `libWCDB.dylib`. 源码 clone 场景会优先 `go build`; 如果本地没有 wxkey 源码或二进制, installer 会用 Go 从 `github.com/r266-tech/wxkey/cmd/wxkey@v1.4.3` 安装 companion CLI.
 
 已有 git checkout 的更新入口:
 
