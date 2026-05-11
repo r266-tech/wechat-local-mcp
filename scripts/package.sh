@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a distribution zip: wx-mcp + wxkey binaries + local libWCDB.dylib +
-# install.sh + README. Friend/agent解压后跑
+# install.sh + docs. Friend/agent解压后跑
 # `./install.sh --all --yes --json` 即可完成安装和 MCP 注册.
 # 前提: 若目标机器没有现成 key, 推荐先跑 ./wxkey bootstrap; 它会走 no-SIP
 # 的 ad-hoc 重签路线完成首次 key 初始化. 已预先写好 ~/.config/wxcli/config.json
@@ -18,6 +18,7 @@ if [[ ! -f "$DYLIB_SRC" ]]; then
 fi
 
 WXKEY_SRC="${WXKEY_SRC:-$HOME/cc-workspace/mcp-servers/wxkey}"
+WXKEY_GO_INSTALL="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2}"
 
 DIST="$SRCDIR/dist/wx-mcp-v${VERSION}-darwin-arm64"
 rm -rf "$DIST" && mkdir -p "$DIST"
@@ -30,15 +31,15 @@ echo "→ building wxkey binary..."
 if [[ -d "$WXKEY_SRC" ]]; then
   ( cd "$WXKEY_SRC" && go build -o "$DIST/wxkey" ./cmd/wxkey )
 else
-  GOBIN="$DIST" go install github.com/r266-tech/wxkey/cmd/wxkey@latest
+  GOBIN="$DIST" go install "$WXKEY_GO_INSTALL"
 fi
 chmod +x "$DIST/wxkey"
 
 echo "→ bundling libWCDB.dylib ($(du -h "$DYLIB_SRC" | cut -f1))..."
 cp "$DYLIB_SRC" "$DIST/libWCDB.dylib"
 
-echo "→ copying README..."
-cp README.md "$DIST/"
+echo "→ copying docs..."
+cp README.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md "$DIST/"
 
 echo "→ copying installer..."
 cp install.sh "$DIST/"

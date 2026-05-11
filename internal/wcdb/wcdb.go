@@ -508,7 +508,7 @@ func (d *DB) Query(sql string, args ...any) ([]Row, error) {
 		names[i] = readCString(sqlite3_column_name(stmt, i))
 	}
 
-	var rows []Row
+	rows := []Row{}
 	for {
 		rc := sqlite3_step(stmt)
 		if rc == SQLITE_DONE {

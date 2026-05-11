@@ -1,9 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/r266-tech/wx-mcp/internal/wcdb"
 )
 
 func TestParseTS_UnixSeconds(t *testing.T) {
@@ -64,7 +68,7 @@ func TestSenderPrefixRe(t *testing.T) {
 	}{
 		{"wxid_puf:\nhello", "hello"},
 		{"abc-123:\r\nworld", "world"},
-		{"  wxid_x:\nbody", "body"},     // leading whitespace
+		{"  wxid_x:\nbody", "body"}, // leading whitespace
 		{"plain text no prefix", "plain text no prefix"},
 		{"https://example.com\nstuff", "https://example.com\nstuff"}, // URL not stripped (':' followed by '/')
 		{"wxid_x: still text", "wxid_x: still text"},                 // ':' not followed by newline
@@ -110,8 +114,8 @@ func TestContentSummary_Quote(t *testing.T) {
 	parsed := map[string]any{
 		"title": "好的",
 		"refermsg": map[string]any{
-			"type":         int(1),
-			"content_raw":  "原话",
+			"type":        int(1),
+			"content_raw": "原话",
 		},
 	}
 	got := contentSummary(49, 57, "<msg>...", parsed)
@@ -127,5 +131,90 @@ func TestContentSummary_System(t *testing.T) {
 	got := contentSummary(10000, 0, "对方撤回了一条消息", nil)
 	if got != "对方撤回了一条消息" {
 		t.Errorf("system = %q", got)
+	}
+}
+
+func TestLiteMessagesKeepsAgentContext(t *testing.T) {
+	rows := []wcdb.Row{{
+		"talker":              "wxid_a",
+		"talker_display_name": "Alice",
+		"chat_type":           "private",
+		"local_id":            int64(1),
+		"content_summary":     "hello",
+		"message_content":     "raw body",
+	}}
+
+	got := liteMessages(rows, "lite")
+	for _, key := range []string{"talker", "talker_display_name", "chat_type", "local_id", "content_summary"} {
+		if _, ok := got[0][key]; !ok {
+			t.Fatalf("liteMessages removed %q", key)
+		}
+	}
+	if _, ok := got[0]["message_content"]; ok {
+		t.Fatalf("liteMessages kept raw message_content")
+	}
+}
+
+func TestValidateToolArgsRejectsBadInteger(t *testing.T) {
+	if err := validateToolArgs("sessions", map[string]any{"limit": "bad"}); err == nil {
+		t.Fatalf("validateToolArgs should reject string limit")
+	}
+	if err := validateToolArgs("sessions", map[string]any{"limit": 5001}); err == nil {
+		t.Fatalf("validateToolArgs should reject oversized limit")
+	}
+	if err := validateToolArgs("sessions", map[string]any{"limit": 50}); err != nil {
+		t.Fatalf("validateToolArgs rejected valid limit: %v", err)
+	}
+}
+
+func TestValidateToolArgsRequired(t *testing.T) {
+	if err := validateToolArgs("search", map[string]any{}); err == nil {
+		t.Fatalf("validateToolArgs should reject missing required keyword")
+	}
+}
+
+func TestBoundedReadSQL(t *testing.T) {
+	got, err := boundedReadSQL("SELECT id FROM t ORDER BY id DESC", 10)
+	if err != nil {
+		t.Fatalf("boundedReadSQL returned error: %v", err)
+	}
+	want := "SELECT * FROM (SELECT id FROM t ORDER BY id DESC) LIMIT 10"
+	if got != want {
+		t.Fatalf("boundedReadSQL = %q, want %q", got, want)
+	}
+
+	if _, err := boundedReadSQL("DELETE FROM t", 10); err == nil {
+		t.Fatalf("boundedReadSQL should reject writes")
+	}
+	if _, err := boundedReadSQL("SELECT 1; SELECT 2", 10); err == nil {
+		t.Fatalf("boundedReadSQL should reject multiple statements")
+	}
+}
+
+func TestAcquireCacheRefreshLock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
+	if err != nil {
+		t.Fatalf("acquireCacheRefreshLock returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatalf("first lock acquire should succeed")
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".wx-mcp", "cache-refresh.lock")); err != nil {
+		t.Fatalf("lock dir missing at %s: %v", lockPath, err)
+	}
+
+	_, acquired2, _, err := acquireCacheRefreshLock()
+	if err != nil {
+		t.Fatalf("second acquire returned error: %v", err)
+	}
+	if acquired2 {
+		t.Fatalf("second acquire should report busy")
+	}
+	unlock()
+
+	_, err = os.Stat(lockPath)
+	if !os.IsNotExist(err) {
+		t.Fatalf("lock should be removed after unlock, stat err=%v", err)
 	}
 }

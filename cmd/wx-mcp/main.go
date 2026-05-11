@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -219,9 +220,11 @@ func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
 			shards = append(shards, e.Name())
 		}
 	}
+	var openErrs []error
 	for _, name := range shards {
 		db, err := s.openDB("message", name)
 		if err != nil {
+			openErrs = append(openErrs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
 		rows, err := db.Query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", tableName)
@@ -229,6 +232,9 @@ func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
 			return db, nil
 		}
 		db.Close()
+	}
+	if len(openErrs) > 0 {
+		return nil, fmt.Errorf("table %s not found in opened message shards; %d/%d shards could not be opened, first error: %v", tableName, len(openErrs), len(shards), openErrs[0])
 	}
 	return nil, fmt.Errorf("table %s not found in %d message shards", tableName, len(shards))
 }
@@ -271,7 +277,7 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.1"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.2"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
 				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +
@@ -281,7 +287,9 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": toolDefs}}
 	case "tools/call":
 		var p toolCallParams
-		json.Unmarshal(req.Params, &p)
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: errResult("invalid tools/call params: " + err.Error())}
+		}
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: s.callTool(p)}
 	default:
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcErr{Code: -32601, Message: "unknown method"}}
@@ -318,6 +326,9 @@ func (s *server) callTool(p toolCallParams) toolResult {
 	fn, ok := handlers[p.Name]
 	if !ok {
 		return errResult("unknown tool: " + p.Name)
+	}
+	if err := validateToolArgs(p.Name, p.Arguments); err != nil {
+		return errResult(err.Error())
 	}
 	result, err := fn(p.Arguments)
 	if err != nil {
@@ -486,12 +497,13 @@ var toolDefs = []toolDef{
 	{
 		Name: "sql",
 		Description: "本地 WCDB SQL. OS 级 readonly (SQLITE_OPEN_READONLY 打开), DDL/DML 会 rc≠0 直接报错 — " +
-			"CTE / subquery / temp view / EXPLAIN 等只读构造都安全. " +
+			"SELECT/WITH 默认外层限流; PRAGMA/EXPLAIN 允许直接执行. " +
 			"db 位置由 subdir/file 定位. 用 schema tool 列出有哪些 db 和表.",
 		InputSchema: jsonSchema(props{
 			"query":  strProp("SQL 语句"),
 			"subdir": strProp("db_storage 下的子目录 (默认 session)"),
 			"file":   strProp("数据库文件名 (默认 session.db)"),
+			"limit":  intProp("SELECT/WITH 外层最大返回行数 (默认 200, 最大 1000)"),
 		}, []string{"query"}),
 	},
 	{
@@ -806,6 +818,9 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 	if talker == "" {
 		return nil, fmt.Errorf("talker or chat is required")
 	}
+	if getStr(a, "talker") == "" && !looksLikeRawChatID(talker) {
+		return nil, fmt.Errorf("chat %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw talker/wxid", talker)
+	}
 	if aggregatorSessions[talker] {
 		return nil, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
 	}
@@ -918,6 +933,7 @@ func liteMessages(rows []wcdb.Row, mode string) []wcdb.Row {
 		return rows
 	}
 	keep := map[string]bool{
+		"talker": true, "talker_display_name": true, "chat_type": true,
 		"local_id": true, "server_id": true,
 		"create_time": true, "create_time_human": true,
 		"sender_wxid": true, "sender_display_name": true, "is_from_me": true,
@@ -948,6 +964,8 @@ func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 				target = resolved
 			}
 			cdb.Close()
+		} else if errors.Is(err, errCacheMissing) {
+			return nil, fmt.Errorf("chat %q requires cache index for group-name resolution; run `wx-mcp cache refresh` first or pass raw chatroom_id", target)
 		}
 	}
 	db, err := s.openDB("contact", "contact.db")
@@ -1357,6 +1375,10 @@ func (s *server) toolSQL(a map[string]any) (any, error) {
 	q := getStr(a, "query")
 	if q == "" {
 		return nil, fmt.Errorf("query is required")
+	}
+	q, err := boundedReadSQL(q, getInt(a, "limit", 200))
+	if err != nil {
+		return nil, err
 	}
 	subdir := getStr(a, "subdir")
 	if subdir == "" {
@@ -1799,6 +1821,130 @@ func getBool(a map[string]any, k string) bool {
 		}
 	}
 	return false
+}
+
+func validateToolArgs(name string, args map[string]any) error {
+	if args == nil {
+		args = map[string]any{}
+	}
+	var schema map[string]any
+	for _, td := range toolDefs {
+		if td.Name == name {
+			if s, ok := td.InputSchema.(map[string]any); ok {
+				schema = s
+			}
+			break
+		}
+	}
+	if schema == nil {
+		return nil
+	}
+	if req, ok := schema["required"].([]string); ok {
+		for _, k := range req {
+			if _, exists := args[k]; !exists {
+				return fmt.Errorf("missing required argument %q for tool %s", k, name)
+			}
+		}
+	}
+	props, _ := schema["properties"].(map[string]any)
+	for k, v := range args {
+		p, ok := props[k].(map[string]any)
+		if !ok || v == nil {
+			continue
+		}
+		want, _ := p["type"].(string)
+		switch want {
+		case "string":
+			if _, ok := v.(string); !ok {
+				return fmt.Errorf("invalid argument %q for tool %s: expected string, got %T", k, name, v)
+			}
+		case "integer":
+			n, ok := integerArgValue(v)
+			if !ok {
+				return fmt.Errorf("invalid argument %q for tool %s: expected integer, got %T", k, name, v)
+			}
+			if n < 0 {
+				return fmt.Errorf("invalid argument %q for tool %s: expected non-negative integer, got %d", k, name, n)
+			}
+			if max, ok := maxIntegerArg(name, k); ok && n > max {
+				return fmt.Errorf("invalid argument %q for tool %s: maximum is %d, got %d", k, name, max, n)
+			}
+		case "boolean":
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("invalid argument %q for tool %s: expected boolean, got %T", k, name, v)
+			}
+		}
+	}
+	return nil
+}
+
+func isIntegerArg(v any) bool {
+	_, ok := integerArgValue(v)
+	return ok
+}
+
+func integerArgValue(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		i := int64(n)
+		return i, n == float64(i)
+	default:
+		return 0, false
+	}
+}
+
+func maxIntegerArg(tool, key string) (int64, bool) {
+	switch key {
+	case "limit":
+		switch tool {
+		case "export_messages":
+			return 1000000, true
+		case "new_messages", "sql":
+			return 1000, true
+		default:
+			return 5000, true
+		}
+	case "offset":
+		return 1000000, true
+	default:
+		return 0, false
+	}
+}
+
+func boundedReadSQL(q string, limit int) (string, error) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "", fmt.Errorf("query is required")
+	}
+	q = strings.TrimSuffix(q, ";")
+	q = strings.TrimSpace(q)
+	if strings.Contains(q, ";") {
+		return "", fmt.Errorf("sql tool accepts one read-only statement at a time")
+	}
+	parts := strings.Fields(q)
+	if len(parts) == 0 {
+		return "", fmt.Errorf("query is required")
+	}
+	verb := strings.ToLower(parts[0])
+	if verb == "select" || verb == "with" {
+		if limit <= 0 {
+			limit = 200
+		}
+		if limit > 1000 {
+			limit = 1000
+		}
+		return fmt.Sprintf("SELECT * FROM (%s) LIMIT %d", q, limit), nil
+	}
+	if verb == "pragma" || verb == "explain" {
+		return q, nil
+	}
+	return "", fmt.Errorf("sql tool only accepts read-only SELECT/WITH/PRAGMA/EXPLAIN statements")
 }
 
 // parseTS accepts unix seconds or local-timezone date/datetime strings.

@@ -192,10 +192,30 @@ func (s *server) toolCacheStatus(a map[string]any) (any, error) {
 }
 
 func (s *server) toolCacheRefresh(a map[string]any) (any, error) {
+	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return map[string]any{
+			"skipped": true,
+			"reason":  "cache refresh already running",
+			"lock":    lockPath,
+		}, nil
+	}
+	defer unlock()
 	return s.refreshCache(getBool(a, "force"))
 }
 
 func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
+	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, fmt.Errorf("cache refresh already running (lock: %s)", lockPath)
+	}
+	defer unlock()
 	paths, err := s.cachePaths()
 	if err != nil {
 		return nil, err
@@ -204,6 +224,35 @@ func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
 		return nil, err
 	}
 	return s.refreshCache(true)
+}
+
+func acquireCacheRefreshLock() (func(), bool, string, error) {
+	if os.Getenv("WX_MCP_CACHE_LOCK_HELD") != "" {
+		return func() {}, true, "", nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, false, "", err
+	}
+	stateDir := filepath.Join(home, ".wx-mcp")
+	lockDir := filepath.Join(stateDir, "cache-refresh.lock")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return nil, false, lockDir, err
+	}
+	if err := os.Mkdir(lockDir, 0o700); err == nil {
+		return func() { _ = os.Remove(lockDir) }, true, lockDir, nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return nil, false, lockDir, err
+	}
+	if st, err := os.Stat(lockDir); err == nil && time.Since(st.ModTime()) > 2*time.Hour {
+		_ = os.Remove(lockDir)
+		if err := os.Mkdir(lockDir, 0o700); err == nil {
+			return func() { _ = os.Remove(lockDir) }, true, lockDir, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return nil, false, lockDir, err
+		}
+	}
+	return nil, false, lockDir, nil
 }
 
 func (s *server) refreshCache(force bool) (any, error) {

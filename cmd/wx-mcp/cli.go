@@ -117,6 +117,10 @@ func runCacheCLI(args []string) {
 }
 
 func runToolCLI(name string, flags map[string]any) {
+	if err := validateToolArgs(name, flags); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	srv := &server{}
 	var result any
 	var err error

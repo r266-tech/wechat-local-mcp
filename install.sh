@@ -68,6 +68,8 @@ Environment:
   WX_MCP_WCDB_DYLIB         Existing libWCDB.dylib to copy.
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
+  WXKEY_GO_INSTALL          Go package/version for source fallback
+                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2).
 EOF
 }
 
@@ -373,7 +375,7 @@ resolve_components() {
     WXKEY_SOURCE="$HOME/cc-workspace/mcp-servers/wxkey/wxkey"
   elif have_cmd go; then
     WXKEY_MODE="go-install"
-    WXKEY_SOURCE="github.com/r266-tech/wxkey/cmd/wxkey@latest"
+    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2}"
   elif have_cmd wxkey; then
     WXKEY_MODE="copy"
     WXKEY_SOURCE="$(command -v wxkey)"
@@ -513,7 +515,7 @@ fi
 trap 'rmdir "\$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh start" >> "\$LOG_FILE"
-"\$INSTALL_DIR/wx-mcp" cache refresh >> "\$LOG_FILE" 2>&1
+WX_MCP_CACHE_LOCK_HELD=1 "\$INSTALL_DIR/wx-mcp" cache refresh >> "\$LOG_FILE" 2>&1
 rc=\$?
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh exit=\$rc" >> "\$LOG_FILE"
 exit "\$rc"
