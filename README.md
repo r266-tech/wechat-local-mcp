@@ -28,6 +28,8 @@ Agent-first 入口:
 > - 不要把这一步喂给 AI agent 的非交互 bash 或 SSH 远程会话 — 没桌面 GUI session, 密码框弹不出来.
 > - 正确做法: 在 Mac 本地终端直接 `./install.sh --all --yes --json` (或单独 `./wxkey bootstrap`), 看到 macOS 密码框时输密码. 之后所有运行 (cache refresh / wx-mcp 启动 / DB 解密) 都不再需要密码, 可全自动化.
 
+> **避免 TCC 反复弹 "wx-mcp 想访问其他 App 的数据" (macOS 15+).** 装完后, 进**系统设置 → 隐私与安全性 → 完全磁盘访问权限**, 点 `+` 把 `~/.local/share/wx-mcp/wx-mcp` 和 `~/.local/share/wx-mcp/wxkey` 加进去. 加完之后所有访问微信容器的请求都默默通过, 不再弹窗. (`--all` 默认**不**装 launchd watcher; 如果你确实需要后台 5 分钟一次自动刷新 cache, 加 `--watcher` 显式开, 但前提是先给上面两个 binary 加 Full Disk Access, 否则 watcher 每次跑都会触发弹窗.)
+
 源码 clone 场景:
 
 ```bash

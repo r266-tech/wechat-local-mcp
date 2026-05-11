@@ -44,6 +44,19 @@ Then call MCP tools, starting with `sessions` or `resolve_chat`.
 - First key setup should use `./wxkey bootstrap`. It may quit, ad-hoc resign, and reopen WeChat.
 - `libWCDB.dylib` must be present beside `wx-mcp`, in `~/.config/wxcli/lib/`, or via `WX_MCP_WCDB_DYLIB`.
 
+## TCC Quiet-Mode (recommend to user once)
+
+After install completes, advise the user once:
+
+1. Open **System Settings → Privacy & Security → Full Disk Access**.
+2. Click `+` and add both `~/.local/share/wx-mcp/wx-mcp` and `~/.local/share/wx-mcp/wxkey`.
+
+Without this, on macOS 15+ each cross-container DB read may trigger a
+"wx-mcp wants to access another app's data" prompt. The installer no
+longer installs a launchd watcher by default for the same reason — call
+`cache_refresh` MCP tool on demand instead of running cache refresh on
+a 5-minute timer.
+
 ## Agent Defaults
 
 - Prefer MCP tools over CLI stdout for production agent workflows.

@@ -50,14 +50,20 @@ Usage:
 
 Install options:
   --all                     Install, register MCP, run wxkey bootstrap,
-                            refresh cache, and install watcher.
+                            and refresh cache (does NOT install watcher;
+                            add --watcher explicitly if you want periodic
+                            background refresh — see README on TCC trade-off).
   --update                  Update an existing git checkout with
                             `git pull --ff-only`, then reinstall binaries.
                             Does not bootstrap, refresh cache, register MCP,
                             or touch watcher unless those flags are added.
   --bootstrap               Run wxkey bootstrap after installing binaries.
   --refresh                 Run wx-mcp cache refresh after installing binaries.
-  --watcher                 Install launchd cache watcher.
+  --watcher                 Install launchd cache watcher (5-min periodic
+                            cache refresh). WARNING: on macOS 15+ each refresh
+                            triggers a "wx-mcp wants to access another app's
+                            data" TCC prompt unless wx-mcp has Full Disk Access
+                            granted in System Settings → Privacy & Security.
   --no-mcp                  Do not register MCP.
   --mcp-client auto|claude|none
   --install-dir PATH        Default: ~/.local/share/wx-mcp
@@ -249,8 +255,11 @@ parse_args() {
       --all)
         DO_BOOTSTRAP=1
         DO_REFRESH=1
-        DO_WATCHER=1
         REGISTER_MCP=1
+        # watcher intentionally NOT in --all: on macOS 15+ the periodic
+        # cross-container access triggers TCC re-prompts ("wx-mcp 想访问其他
+        # App 的数据") repeatedly for ad-hoc signed binaries. Users who
+        # actually want background cache refresh can pass --watcher.
         shift
         ;;
       --bootstrap)
