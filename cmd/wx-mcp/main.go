@@ -280,7 +280,7 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.4"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.5"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
 				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +

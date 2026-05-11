@@ -9,6 +9,16 @@ This repository is meant to be installed and operated by an agent for a user.
 ./install.sh --all --yes --json
 ```
 
+## Update Path
+
+For an existing git checkout:
+
+```bash
+./install.sh --update --yes --json
+```
+
+This runs `git pull --ff-only` when possible, then reinstalls the binaries. It does not rerun key bootstrap, cache refresh, MCP registration, or watcher setup unless those flags are explicitly added.
+
 After install, verify with:
 
 ```bash

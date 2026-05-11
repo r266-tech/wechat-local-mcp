@@ -1,6 +1,6 @@
 {
   "name": "wx-mcp",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "Agent-first MCP server for local WeChat 4.x data on macOS.",
   "homepage": "https://github.com/r266-tech/wx-mcp",
   "license": "MIT",
@@ -11,7 +11,8 @@
   },
   "installer": {
     "command": "./install.sh --all --yes --json",
-    "doctor": "./install.sh --doctor --json"
+    "doctor": "./install.sh --doctor --json",
+    "update": "./install.sh --update --yes --json"
   },
   "runtime": {
     "requires": [

@@ -43,6 +43,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ./install.sh [--all] [--yes] [--json]
+  ./install.sh --update [--yes] [--json]
   ./install.sh --doctor [--json]
   ./install.sh --dry-run --all --json
   ./install.sh --uninstall --yes [--json]
@@ -50,6 +51,10 @@ Usage:
 Install options:
   --all                     Install, register MCP, run wxkey bootstrap,
                             refresh cache, and install watcher.
+  --update                  Update an existing git checkout with
+                            `git pull --ff-only`, then reinstall binaries.
+                            Does not bootstrap, refresh cache, register MCP,
+                            or touch watcher unless those flags are added.
   --bootstrap               Run wxkey bootstrap after installing binaries.
   --refresh                 Run wx-mcp cache refresh after installing binaries.
   --watcher                 Install launchd cache watcher.
@@ -233,6 +238,12 @@ parse_args() {
         ;;
       --uninstall)
         MODE="uninstall"
+        shift
+        ;;
+      --update)
+        MODE="update"
+        REGISTER_MCP=0
+        MCP_CLIENT="none"
         shift
         ;;
       --all)
@@ -430,6 +441,18 @@ install_components() {
   if [[ "$LIB_SOURCE" != "$INSTALL_DIR/libWCDB.dylib" ]]; then
     cp "$LIB_SOURCE" "$INSTALL_DIR/libWCDB.dylib" || die "copy libWCDB.dylib failed" 1
   fi
+}
+
+update_source() {
+  if [[ -d "$SOURCE_DIR/.git" ]]; then
+    ACTIONS+=("git pull --ff-only in $SOURCE_DIR")
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      return
+    fi
+    run_logged_in "$SOURCE_DIR" git pull --ff-only || die "git update failed; resolve the checkout or download the latest release zip" 1
+    return
+  fi
+  warn "source_dir is not a git checkout; --update will reinstall current files only. For release-zip installs, have the agent download the latest GitHub release zip first."
 }
 
 register_mcp() {
@@ -635,6 +658,16 @@ main() {
       ;;
     install)
       confirm_or_die
+      install_components
+      register_mcp
+      run_bootstrap
+      run_cache_refresh
+      install_watcher
+      finish true
+      ;;
+    update)
+      confirm_or_die
+      update_source
       install_components
       register_mcp
       run_bootstrap
