@@ -39,7 +39,7 @@ echo "→ bundling libWCDB.dylib ($(du -h "$DYLIB_SRC" | cut -f1))..."
 cp "$DYLIB_SRC" "$DIST/libWCDB.dylib"
 
 echo "→ copying docs..."
-cp README.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md "$DIST/"
+cp README.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md AGENTS.md mcp-server.json "$DIST/"
 
 echo "→ copying installer..."
 cp install.sh "$DIST/"
@@ -48,7 +48,9 @@ chmod +x "$DIST/install.sh"
 echo "→ zipping..."
 cd dist
 zip -qr "wx-mcp-v${VERSION}-darwin-arm64.zip" "wx-mcp-v${VERSION}-darwin-arm64"
+shasum -a 256 "wx-mcp-v${VERSION}-darwin-arm64.zip" > "wx-mcp-v${VERSION}-darwin-arm64.zip.sha256"
 
 echo
 echo "✓ dist/wx-mcp-v${VERSION}-darwin-arm64.zip"
 ls -lh "wx-mcp-v${VERSION}-darwin-arm64.zip"
+echo "✓ dist/wx-mcp-v${VERSION}-darwin-arm64.zip.sha256"

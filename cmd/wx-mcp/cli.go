@@ -80,6 +80,12 @@ func maybeRunCLI(args []string) bool {
 	case "favorites":
 		runToolCLI("favorites", parseKVFlags(args[1:]))
 		return true
+	case "red-packets", "red_packets":
+		runToolCLI("red_packets", parseKVFlags(args[1:]))
+		return true
+	case "transfers":
+		runToolCLI("transfers", parseKVFlags(args[1:]))
+		return true
 	case "sns", "sns-feed", "sns_feed":
 		runToolCLI("sns_feed", parseKVFlags(args[1:]))
 		return true
@@ -153,6 +159,10 @@ func runToolCLI(name string, flags map[string]any) {
 		result, err = srv.toolGroupMembers(flags)
 	case "favorites":
 		result, err = srv.toolFavorites(flags)
+	case "red_packets":
+		result, err = srv.toolRedPackets(flags)
+	case "transfers":
+		result, err = srv.toolTransfers(flags)
 	case "sns_feed":
 		result, err = srv.toolSnsFeed(flags)
 	case "sns_search":
@@ -247,6 +257,8 @@ Query/export CLI:
   wx-mcp new-messages [--after 2026-05-11] [--talker wxid_x] [--limit 100]
   wx-mcp stats ["张三"] [--limit 10]
   wx-mcp favorites [--limit 20]
+  wx-mcp red-packets [--limit 20]
+  wx-mcp transfers [--limit 20]
   wx-mcp sns-feed [--limit 20]
   wx-mcp sns-search "关键词"
   wx-mcp sns-notifications [--include-read]

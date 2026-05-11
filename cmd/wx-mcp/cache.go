@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -328,10 +330,11 @@ func (s *server) refreshCache(force bool) (any, error) {
 		metas = append(metas, meta)
 	}
 
-	indexStats, err := s.buildCacheIndex(paths, metas)
+	indexStats, indexErrors, err := s.buildCacheIndex(paths, metas)
 	if err != nil {
 		return nil, err
 	}
+	errorsOut = append(errorsOut, indexErrors...)
 	for k, v := range indexStats {
 		stats[k] = v
 	}
@@ -429,21 +432,21 @@ func loadCacheFileMeta(indexPath string) map[string]cacheFileMeta {
 	return out
 }
 
-func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[string]int64, error) {
+func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[string]int64, []map[string]string, error) {
 	tmp := paths.IndexPath + ".tmp"
 	_ = os.Remove(tmp)
 	_ = os.Remove(tmp + "-wal")
 	_ = os.Remove(tmp + "-shm")
 	db, err := wcdb.OpenPlain(tmp, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer db.Close()
 	if err := createIndexSchema(db); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := db.Exec("BEGIN"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stats := map[string]int64{}
 	for _, f := range files {
@@ -476,16 +479,16 @@ func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[s
 	}
 	if err := db.Exec("COMMIT"); err != nil {
 		_ = db.Exec("ROLLBACK")
-		return nil, err
+		return nil, nil, err
 	}
 	db.Close()
 	_ = os.Remove(paths.IndexPath)
 	_ = os.Remove(paths.IndexPath + "-wal")
 	_ = os.Remove(paths.IndexPath + "-shm")
 	if err := os.Rename(tmp, paths.IndexPath); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return stats, nil
+	return stats, msgErrs, nil
 }
 
 func createIndexSchema(db *wcdb.DB) error {
@@ -817,12 +820,9 @@ func (s *server) cacheMessages(a map[string]any) ([]wcdb.Row, bool, error) {
 		return nil, false, err
 	}
 	normalizeCacheMessages(rows)
-	mode := getStr(a, "fields")
-	if mode == "" {
-		mode = "lite"
-	}
-	if mode != "lite" && mode != "full" {
-		return nil, true, fmt.Errorf("invalid fields=%q: must be \"lite\" or \"full\"", mode)
+	mode, err := fieldsMode(a)
+	if err != nil {
+		return nil, true, err
 	}
 	return liteMessages(rows, mode), true, nil
 }
@@ -832,6 +832,7 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	if kw == "" {
 		return nil, true, fmt.Errorf("keyword is required")
 	}
+	mode := searchMode(a)
 	db, err := s.openCacheIndex(false)
 	if err != nil {
 		if errors.Is(err, errCacheMissing) {
@@ -857,17 +858,27 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	if err != nil {
 		return nil, true, err
 	}
-	where = append([]string{"message_fts MATCH ?"}, where...)
-	args = append([]any{ftsPhrase(kw)}, args...)
-	args = append(args, limit)
-	rows, err := db.Query(fmt.Sprintf(`SELECT m.local_id, m.talker, m.talker_display_name, m.create_time,
-		m.sender_wxid, m.sender_display_name, m.base_kind, m.kind_name,
-		COALESCE(NULLIF(m.content_summary, ''), m.message_content) AS content,
-		c.type AS talker_contact_type, c.is_verified AS talker_is_verified
-		FROM message_fts f JOIN messages_unified m ON m.rowid = f.rowid
-		LEFT JOIN contacts_unified c ON c.username = m.talker
-		WHERE %s ORDER BY m.create_time DESC LIMIT ?`, strings.Join(where, " AND ")), args...)
-	if err != nil || len(rows) == 0 {
+	var rows []wcdb.Row
+	if mode == "fts" || mode == "auto" {
+		ftsWhere := append([]string{"message_fts MATCH ?"}, where...)
+		ftsArgs := append([]any{ftsPhrase(kw)}, args...)
+		ftsArgs = append(ftsArgs, limit)
+		rows, err = db.Query(fmt.Sprintf(`SELECT m.local_id, m.talker, m.talker_display_name, m.create_time,
+			m.sender_wxid, m.sender_display_name, m.base_kind, m.kind_name,
+			COALESCE(NULLIF(m.content_summary, ''), m.message_content) AS content,
+			c.type AS talker_contact_type, c.is_verified AS talker_is_verified
+			FROM message_fts f JOIN messages_unified m ON m.rowid = f.rowid
+			LEFT JOIN contacts_unified c ON c.username = m.talker
+			WHERE %s ORDER BY m.create_time DESC LIMIT ?`, strings.Join(ftsWhere, " AND ")), ftsArgs...)
+		if err != nil || mode == "fts" || len(rows) > 0 {
+			if err != nil {
+				return nil, false, err
+			}
+			decorateMessageSearchRows(rows)
+			return rows, true, nil
+		}
+	}
+	if mode == "like" || mode == "auto" {
 		like := "%" + kw + "%"
 		where, args, err = cacheMessageWhere(db, searchFilters, "")
 		if err != nil {
@@ -886,13 +897,17 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	decorateMessageSearchRows(rows)
+	return rows, true, nil
+}
+
+func decorateMessageSearchRows(rows []wcdb.Row) {
 	decorateMessageRows(rows)
 	for _, r := range rows {
 		if c := rowString(r, "content"); c != "" {
 			r["content"] = senderPrefixRe.ReplaceAllString(c, "")
 		}
 	}
-	return rows, true, nil
 }
 
 func (s *server) toolUnread(a map[string]any) (any, error) {
@@ -948,6 +963,10 @@ func (s *server) toolNewMessages(a map[string]any) (any, error) {
 		return nil, err
 	}
 	defer db.Close()
+	fields, err := fieldsMode(a)
+	if err != nil {
+		return nil, err
+	}
 	talker, err := resolveTalkerForCache(db, a, false)
 	if err != nil {
 		return nil, err
@@ -965,19 +984,27 @@ func (s *server) toolNewMessages(a map[string]any) (any, error) {
 		where = append(where, "talker = ?")
 		args = append(args, talker)
 	}
-	ts, rowid, err := parseCacheCursor(getStr(a, "cursor"))
+	cursor, err := parseCacheCursor(getStr(a, "cursor"))
 	if err != nil {
 		return nil, err
 	}
+	ts := cursor.CreateTime
 	if ts == 0 {
 		ts, err = parseTS(getStr(a, "after"))
 		if err != nil {
 			return nil, err
 		}
 	}
-	if ts > 0 {
+	if cursor.LegacyRowID > 0 {
 		where = append(where, "(m.create_time > ? OR (m.create_time = ? AND m.rowid > ?))")
-		args = append(args, ts, ts, rowid)
+		args = append(args, ts, ts, cursor.LegacyRowID)
+	} else if ts > 0 && cursor.Talker != "" {
+		where = append(where, `(m.create_time > ? OR
+			(m.create_time = ? AND (m.talker > ? OR (m.talker = ? AND m.local_id > ?))))`)
+		args = append(args, ts, ts, cursor.Talker, cursor.Talker, cursor.LocalID)
+	} else if ts > 0 {
+		where = append(where, "m.create_time >= ?")
+		args = append(args, ts)
 	}
 	wc := ""
 	if len(where) > 0 {
@@ -989,7 +1016,7 @@ func (s *server) toolNewMessages(a map[string]any) (any, error) {
 		m.content_summary, m.message_content, m.parsed_json,
 		c.type AS talker_contact_type, c.is_verified AS talker_is_verified
 		FROM messages_unified m LEFT JOIN contacts_unified c ON c.username = m.talker
-		%s ORDER BY m.create_time ASC, m.rowid ASC LIMIT ?`, wc), args...)
+		%s ORDER BY m.create_time ASC, m.talker ASC, m.local_id ASC LIMIT ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -997,9 +1024,9 @@ func (s *server) toolNewMessages(a map[string]any) (any, error) {
 	next := ""
 	if len(rows) > 0 {
 		last := rows[len(rows)-1]
-		next = fmt.Sprintf("%d:%d", rowInt64(last, "create_time"), rowInt64(last, "cache_rowid"))
+		next = makeCacheCursor(rowInt64(last, "create_time"), rowString(last, "talker"), rowInt64(last, "local_id"))
 	}
-	return map[string]any{"messages": liteMessages(rows, getFieldsMode(a)), "next_cursor": next}, nil
+	return map[string]any{"messages": liteMessages(rows, fields), "next_cursor": next}, nil
 }
 
 func (s *server) toolStats(a map[string]any) (any, error) {
@@ -1091,35 +1118,95 @@ func (s *server) toolExportMessages(a map[string]any) (any, error) {
 	if _, ok := a["limit"]; !ok {
 		a["limit"] = float64(10000)
 	}
-	rows, err := queryCacheMessages(db, a, "create_time ASC, rowid ASC")
-	if err != nil {
-		return nil, err
-	}
-	normalizeCacheMessages(rows)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	var content string
-	switch format {
-	case "jsonl":
-		var b strings.Builder
-		for _, r := range rows {
-			j, _ := json.Marshal(r)
-			b.Write(j)
-			b.WriteByte('\n')
-		}
-		content = b.String()
-	case "markdown":
-		content = renderMessagesMarkdown(rows)
-	case "html":
-		content = renderMessagesHTML(rows)
-	default:
-		return nil, fmt.Errorf("invalid format=%q: jsonl / markdown / html", format)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	count, err := writeExportMessages(db, a, path, format)
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": path, "format": format, "count": len(rows)}, nil
+	return map[string]any{"path": path, "format": format, "count": count}, nil
+}
+
+func writeExportMessages(db *wcdb.DB, a map[string]any, path, format string) (int, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	w := bufio.NewWriterSize(f, 256*1024)
+	totalLimit := getInt(a, "limit", 10000)
+	if totalLimit <= 0 {
+		totalLimit = 10000
+	}
+	batchSize := 1000
+	if totalLimit < batchSize {
+		batchSize = totalLimit
+	}
+	baseOffset := getInt(a, "offset", 0)
+	written := 0
+	switch format {
+	case "jsonl":
+	case "markdown":
+	case "html":
+		_, _ = w.WriteString("<!doctype html><meta charset=\"utf-8\"><title>wx-mcp export</title><body>")
+	default:
+		return 0, fmt.Errorf("invalid format=%q: jsonl / markdown / html", format)
+	}
+	for written < totalLimit {
+		batchArgs := map[string]any{}
+		for k, v := range a {
+			batchArgs[k] = v
+		}
+		remaining := totalLimit - written
+		limit := batchSize
+		if remaining < limit {
+			limit = remaining
+		}
+		batchArgs["limit"] = limit
+		batchArgs["offset"] = baseOffset + written
+		rows, err := queryCacheMessages(db, batchArgs, "create_time ASC, talker ASC, local_id ASC")
+		if err != nil {
+			return written, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		normalizeCacheMessages(rows)
+		for _, r := range rows {
+			switch format {
+			case "jsonl":
+				j, _ := json.Marshal(r)
+				if _, err := w.Write(j); err != nil {
+					return written, err
+				}
+				if err := w.WriteByte('\n'); err != nil {
+					return written, err
+				}
+			case "markdown":
+				if _, err := w.WriteString(renderMessageMarkdown(r)); err != nil {
+					return written, err
+				}
+			case "html":
+				if _, err := w.WriteString(renderMessageHTMLSection(r)); err != nil {
+					return written, err
+				}
+			}
+		}
+		written += len(rows)
+		if len(rows) < limit {
+			break
+		}
+	}
+	if format == "html" {
+		if _, err := w.WriteString("</body>"); err != nil {
+			return written, err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return written, err
+	}
+	return written, nil
 }
 
 func queryCacheMessages(db *wcdb.DB, a map[string]any, order string) ([]wcdb.Row, error) {
@@ -1220,31 +1307,68 @@ func normalizeCacheMessages(rows []wcdb.Row) {
 	}
 }
 
-func getFieldsMode(a map[string]any) string {
+func fieldsMode(a map[string]any) (string, error) {
 	mode := getStr(a, "fields")
 	if mode == "" {
+		return "lite", nil
+	}
+	if mode != "lite" && mode != "full" {
+		return "", fmt.Errorf("invalid fields=%q: must be \"lite\" or \"full\"", mode)
+	}
+	return mode, nil
+}
+
+func getFieldsMode(a map[string]any) string {
+	mode, err := fieldsMode(a)
+	if err != nil {
 		return "lite"
 	}
 	return mode
 }
 
-func parseCacheCursor(cursor string) (int64, int64, error) {
+type cacheCursor struct {
+	CreateTime  int64
+	Talker      string
+	LocalID     int64
+	LegacyRowID int64
+}
+
+func makeCacheCursor(createTime int64, talker string, localID int64) string {
+	return fmt.Sprintf("v2:%d:%s:%d", createTime, base64.RawURLEncoding.EncodeToString([]byte(talker)), localID)
+}
+
+func parseCacheCursor(cursor string) (cacheCursor, error) {
 	if cursor == "" {
-		return 0, 0, nil
+		return cacheCursor{}, nil
 	}
 	parts := strings.Split(cursor, ":")
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("invalid cursor %q: want create_time:cache_rowid", cursor)
+	if len(parts) == 4 && parts[0] == "v2" {
+		ts, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return cacheCursor{}, fmt.Errorf("invalid cursor %q: bad create_time: %w", cursor, err)
+		}
+		talkerBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+		if err != nil {
+			return cacheCursor{}, fmt.Errorf("invalid cursor %q: bad talker encoding: %w", cursor, err)
+		}
+		localID, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return cacheCursor{}, fmt.Errorf("invalid cursor %q: bad local_id: %w", cursor, err)
+		}
+		return cacheCursor{CreateTime: ts, Talker: string(talkerBytes), LocalID: localID}, nil
 	}
-	ts, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0, 0, err
+	if len(parts) == 2 {
+		ts, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return cacheCursor{}, err
+		}
+		rowid, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return cacheCursor{}, err
+		}
+		return cacheCursor{CreateTime: ts, LegacyRowID: rowid}, nil
 	}
-	rowid, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, err
-	}
-	return ts, rowid, nil
+	return cacheCursor{}, fmt.Errorf("invalid cursor %q: want v2:create_time:base64url_talker:local_id", cursor)
 }
 
 func ftsPhrase(s string) string {
@@ -1254,18 +1378,24 @@ func ftsPhrase(s string) string {
 func renderMessagesMarkdown(rows []wcdb.Row) string {
 	var b strings.Builder
 	for _, r := range rows {
-		b.WriteString("### ")
-		b.WriteString(rowString(r, "create_time_human"))
-		b.WriteString(" ")
-		b.WriteString(rowString(r, "talker_display_name"))
-		if sender := rowString(r, "sender_display_name"); sender != "" {
-			b.WriteString(" / ")
-			b.WriteString(sender)
-		}
-		b.WriteString("\n\n")
-		b.WriteString(rowString(r, "content_summary"))
-		b.WriteString("\n\n")
+		b.WriteString(renderMessageMarkdown(r))
 	}
+	return b.String()
+}
+
+func renderMessageMarkdown(r wcdb.Row) string {
+	var b strings.Builder
+	b.WriteString("### ")
+	b.WriteString(rowString(r, "create_time_human"))
+	b.WriteString(" ")
+	b.WriteString(rowString(r, "talker_display_name"))
+	if sender := rowString(r, "sender_display_name"); sender != "" {
+		b.WriteString(" / ")
+		b.WriteString(sender)
+	}
+	b.WriteString("\n\n")
+	b.WriteString(rowString(r, "content_summary"))
+	b.WriteString("\n\n")
 	return b.String()
 }
 
@@ -1273,19 +1403,25 @@ func renderMessagesHTML(rows []wcdb.Row) string {
 	var b strings.Builder
 	b.WriteString("<!doctype html><meta charset=\"utf-8\"><title>wx-mcp export</title><body>")
 	for _, r := range rows {
-		b.WriteString("<section><h3>")
-		b.WriteString(html.EscapeString(rowString(r, "create_time_human")))
-		b.WriteString(" ")
-		b.WriteString(html.EscapeString(rowString(r, "talker_display_name")))
-		if sender := rowString(r, "sender_display_name"); sender != "" {
-			b.WriteString(" / ")
-			b.WriteString(html.EscapeString(sender))
-		}
-		b.WriteString("</h3><p>")
-		b.WriteString(html.EscapeString(rowString(r, "content_summary")))
-		b.WriteString("</p></section>")
+		b.WriteString(renderMessageHTMLSection(r))
 	}
 	b.WriteString("</body>")
+	return b.String()
+}
+
+func renderMessageHTMLSection(r wcdb.Row) string {
+	var b strings.Builder
+	b.WriteString("<section><h3>")
+	b.WriteString(html.EscapeString(rowString(r, "create_time_human")))
+	b.WriteString(" ")
+	b.WriteString(html.EscapeString(rowString(r, "talker_display_name")))
+	if sender := rowString(r, "sender_display_name"); sender != "" {
+		b.WriteString(" / ")
+		b.WriteString(html.EscapeString(sender))
+	}
+	b.WriteString("</h3><p>")
+	b.WriteString(html.EscapeString(rowString(r, "content_summary")))
+	b.WriteString("</p></section>")
 	return b.String()
 }
 

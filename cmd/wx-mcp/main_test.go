@@ -173,6 +173,69 @@ func TestValidateToolArgsRequired(t *testing.T) {
 	}
 }
 
+func TestValidateToolArgsRejectsUnknownAndBadEnums(t *testing.T) {
+	if err := validateToolArgs("sessions", map[string]any{"bogus": "x"}); err == nil {
+		t.Fatalf("validateToolArgs should reject unknown args")
+	}
+	if err := validateToolArgs("messages", map[string]any{"fields": "raw"}); err == nil {
+		t.Fatalf("validateToolArgs should reject bad fields enum")
+	}
+	if err := validateToolArgs("export_messages", map[string]any{"path": "/tmp/x", "format": "csv"}); err == nil {
+		t.Fatalf("validateToolArgs should reject bad format enum")
+	}
+	if err := validateToolArgs("sessions", map[string]any{"type_filter": "private,group"}); err != nil {
+		t.Fatalf("validateToolArgs rejected comma type_filter: %v", err)
+	}
+	if err := validateToolArgs("sessions", map[string]any{"type_filter": "nope"}); err == nil {
+		t.Fatalf("validateToolArgs should reject unknown type_filter")
+	}
+	if err := validateToolArgs("resolve_chat", map[string]any{"chat": "张三"}); err != nil {
+		t.Fatalf("validateToolArgs should allow resolve_chat aliases: %v", err)
+	}
+}
+
+func TestCacheCursorRoundTrip(t *testing.T) {
+	cursor := makeCacheCursor(1776330000, "room:colon@chatroom", 42)
+	got, err := parseCacheCursor(cursor)
+	if err != nil {
+		t.Fatalf("parseCacheCursor returned error: %v", err)
+	}
+	if got.CreateTime != 1776330000 || got.Talker != "room:colon@chatroom" || got.LocalID != 42 || got.LegacyRowID != 0 {
+		t.Fatalf("parseCacheCursor = %#v", got)
+	}
+	legacy, err := parseCacheCursor("1776330000:99")
+	if err != nil {
+		t.Fatalf("legacy parseCacheCursor returned error: %v", err)
+	}
+	if legacy.CreateTime != 1776330000 || legacy.LegacyRowID != 99 {
+		t.Fatalf("legacy parseCacheCursor = %#v", legacy)
+	}
+}
+
+func TestParseSnsXMLMediaMetadata(t *testing.T) {
+	raw := `<SnsDataItem><TimelineObject><id>tid1</id><username>wxid_a</username><createTime>1776330000</createTime><contentDesc>hello</contentDesc><ContentObject><type>1</type><mediaList><media><type>15</type><sub_type>10</sub_type><url enc_idx="1" key="video-key" token="video-token">https://example.test/video.mp4</url><thumb enc_idx="0" key="thumb-key" token="thumb-token">https://example.test/thumb.jpg</thumb><size width="720" height="1280" totalSize="123456" /><videomd5>video-md5</videomd5><videoDuration>37</videoDuration></media></mediaList></ContentObject></TimelineObject><LocalExtraInfo><nickname>Alice</nickname></LocalExtraInfo></SnsDataItem>`
+	post, err := parseSnsXML(raw)
+	if err != nil {
+		t.Fatalf("parseSnsXML returned error: %v", err)
+	}
+	if len(post.Media) != 1 {
+		t.Fatalf("media len = %d, want 1", len(post.Media))
+	}
+	m := post.Media[0]
+	if m.Type != "video" || m.RawType != 15 || m.SubType != "10" {
+		t.Fatalf("media type fields = %#v", m)
+	}
+	if m.URLKey != "video-key" || m.URLToken != "video-token" || m.URLEncIdx != "1" {
+		t.Fatalf("url metadata missing: %#v", m)
+	}
+	if m.ThumbKey != "thumb-key" || m.ThumbToken != "thumb-token" || m.ThumbEncIdx != "0" {
+		t.Fatalf("thumb metadata missing: %#v", m)
+	}
+	if m.Width != 720 || m.Height != 1280 || m.TotalSize != 123456 || m.VideoMD5 != "video-md5" || m.VideoDuration != 37 {
+		t.Fatalf("size/video metadata missing: %#v", m)
+	}
+}
+
 func TestBoundedReadSQL(t *testing.T) {
 	got, err := boundedReadSQL("SELECT id FROM t ORDER BY id DESC", 10)
 	if err != nil {

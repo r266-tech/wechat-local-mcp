@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,9 +48,10 @@ type rpcErr struct {
 }
 
 type toolDef struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	InputSchema any    `json:"inputSchema"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema any            `json:"inputSchema"`
+	Annotations map[string]any `json:"annotations,omitempty"`
 }
 
 type toolCallParams struct {
@@ -277,14 +279,14 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.2"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.3"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
 				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +
 				"- Freshness check: `sessions limit=1`, compare `last_timestamp` to now. Stale by hours = WeChat likely not running.",
 		}}
 	case "tools/list":
-		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": toolDefs}}
+		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": listedToolDefs()}}
 	case "tools/call":
 		var p toolCallParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
@@ -368,9 +370,11 @@ var toolDefs = []toolDef{
 			"当 agent 只知道人名或群名时先调这个; 返回 candidates 按精确匹配和最近会话排序.",
 		InputSchema: jsonSchema(props{
 			"query":       strProp("要解析的人名/群名/微信号"),
+			"chat":        strProp("query 的别名"),
+			"keyword":     strProp("query 的别名"),
 			"type_filter": strProp("可选: private / group / official_account / folded / bot, 可逗号分隔"),
 			"limit":       intProp("候选数量 (默认 10)"),
-		}, []string{"query"}),
+		}, nil),
 	},
 	{
 		Name: "contacts",
@@ -401,14 +405,18 @@ var toolDefs = []toolDef{
 			"57=quote/87=announcement/2000=transfer/2001=red_packet/62=pat/51=channel_video/3=music. " +
 			"after/before 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
-			"talker":  strProp("会话对象 (wxid 或 xxx@chatroom)"),
-			"chat":    strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
-			"limit":   intProp("返回条数 (默认 50)"),
-			"offset":  intProp("跳过条数 (默认 0)"),
-			"after":   strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"before":  strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"keyword": strProp("消息内容关键词"),
-			"fields":  strProp("lite (默认) / full"),
+			"talker":    strProp("会话对象 (wxid 或 xxx@chatroom)"),
+			"chat":      strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
+			"limit":     intProp("返回条数 (默认 50)"),
+			"offset":    intProp("跳过条数 (默认 0)"),
+			"after":     strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"before":    strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"keyword":   strProp("消息内容关键词"),
+			"type":      strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name": strProp("可选: 同 type"),
+			"base_kind": intProp("可选: base_kind raw int"),
+			"sender":    strProp("可选: sender wxid 或昵称"),
+			"fields":    enumStrProp("lite (默认) / full", "lite", "full"),
 		}, nil),
 	},
 	{
@@ -428,7 +436,7 @@ var toolDefs = []toolDef{
 		Name: "sns",
 		Description: "朋友圈 timeline. 返回字段: tid / username / nickname / avatar_url / " +
 			"create_time / content / type / private / liked_by_me / " +
-			"media (type/url/thumb/width/height) / location (name/lat/lon) / " +
+			"media (type/sub_type/url/thumb/url_key/thumb_key/md5/width/height/total_size/video_md5/video_duration) / location (name/lat/lon) / " +
 			"likes ([username, nickname]) / " +
 			"comments ([username, nickname, content, create_time, reply_to, reply_to_nick]). " +
 			"时间过滤针对 XML 里的 createTime (非 SQL tid), 先按 tid DESC 粗拉再解析过滤.",
@@ -481,17 +489,19 @@ var toolDefs = []toolDef{
 			"字段: content (群聊已剥 'wxid:\\n' 前缀) / local_id / talker / talker_display_name / chat_type / " +
 			"create_time / sender_wxid / sender_display_name / base_kind / kind_name. " +
 			"sender + base_kind/kind_name 来自 join 回 Msg_<hash>(talker), 部分命中可能因 shard 路由失败缺这几字段. " +
-			"FTS 索引可能落后实时几分钟.",
+			"search_mode=fts 默认只走自建 FTS; like 显式做慢速模糊 LIKE; auto 先 FTS 无结果再 LIKE. FTS 索引可能落后实时几分钟.",
 		InputSchema: jsonSchema(props{
-			"keyword":   strProp("搜索关键词"),
-			"talker":    strProp("可选: 限定 wxid 或 xxx@chatroom"),
-			"chat":      strProp("可选: 限定昵称/备注/群名, 自动解析为 talker"),
-			"after":     strProp("可选: 起始时间"),
-			"before":    strProp("可选: 截止时间"),
-			"type":      strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
-			"kind_name": strProp("可选: 同 type"),
-			"sender":    strProp("可选: sender wxid 或昵称"),
-			"limit":     intProp("返回条数 (默认 20)"),
+			"keyword":     strProp("搜索关键词"),
+			"talker":      strProp("可选: 限定 wxid 或 xxx@chatroom"),
+			"chat":        strProp("可选: 限定昵称/备注/群名, 自动解析为 talker"),
+			"after":       strProp("可选: 起始时间"),
+			"before":      strProp("可选: 截止时间"),
+			"type":        strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name":   strProp("可选: 同 type"),
+			"base_kind":   intProp("可选: base_kind raw int"),
+			"sender":      strProp("可选: sender wxid 或昵称"),
+			"search_mode": enumStrProp("fts (默认) / like / auto", "fts", "like", "auto"),
+			"limit":       intProp("返回条数 (默认 20)"),
 		}, []string{"keyword"}),
 	},
 	{
@@ -526,9 +536,14 @@ var toolDefs = []toolDef{
 			"session_username / session_display_name / native_url (微信红包深链) / message_server_id / " +
 			"wishing (祝福语 如 '恭喜发财大吉大利', 从 join XML 提取) / scene_text (如 '微信红包', omitempty). " +
 			"红包金额随机, 仅领取后可见, 不在本地数据中. " +
-			"表无时间字段, 按 rowid DESC (近似收到顺序). 真实时间过滤请用 sql tool JOIN messages.create_time via message_server_id.",
+			"不传 after/before 时按 rowid DESC (近似收到顺序); 传时间/sender/chat 过滤时使用 cache index join messages.create_time.",
 		InputSchema: jsonSchema(props{
-			"limit": intProp("返回条数 (默认 50)"),
+			"limit":  intProp("返回条数 (默认 50)"),
+			"talker": strProp("可选: 限定会话对象"),
+			"chat":   strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
+			"sender": strProp("可选: sender wxid 或昵称"),
+			"after":  strProp("可选: 起始时间"),
+			"before": strProp("可选: 截止时间"),
 		}, nil),
 	},
 	{
@@ -614,7 +629,7 @@ var toolDefs = []toolDef{
 			"after":  strProp("可选: 起始时间 (unix秒 或 2006-01-02)"),
 			"cursor": strProp("可选: 上次返回的 next_cursor"),
 			"limit":  intProp("返回条数 (默认 100, 最大 1000)"),
-			"fields": strProp("lite (默认) / full"),
+			"fields": enumStrProp("lite (默认) / full", "lite", "full"),
 		}, nil),
 	},
 	{
@@ -622,11 +637,15 @@ var toolDefs = []toolDef{
 		Description: "基于 cache index 的统计. 不传 chat/talker 返回全局 top talkers/senders/kinds/daily; " +
 			"传 chat/talker 返回单会话 by_sender/by_kind/daily/hourly. 支持 after/before.",
 		InputSchema: jsonSchema(props{
-			"chat":   strProp("可选: 昵称/备注/群名"),
-			"talker": strProp("可选: wxid 或 xxx@chatroom"),
-			"after":  strProp("可选: 起始时间"),
-			"before": strProp("可选: 截止时间"),
-			"limit":  intProp("每组统计返回条数 (默认 10)"),
+			"chat":      strProp("可选: 昵称/备注/群名"),
+			"talker":    strProp("可选: wxid 或 xxx@chatroom"),
+			"after":     strProp("可选: 起始时间"),
+			"before":    strProp("可选: 截止时间"),
+			"kind_name": strProp("可选: kind_name 过滤"),
+			"type":      strProp("可选: 同 kind_name"),
+			"base_kind": intProp("可选: base_kind raw int"),
+			"sender":    strProp("可选: sender wxid 或昵称"),
+			"limit":     intProp("每组统计返回条数 (默认 10)"),
 		}, nil),
 	},
 	{
@@ -634,14 +653,19 @@ var toolDefs = []toolDef{
 		Description: "从 cache index 导出消息到本地文件. format=jsonl/markdown/html. " +
 			"支持 talker/after/before/keyword/limit 过滤.",
 		InputSchema: jsonSchema(props{
-			"path":    strProp("输出文件绝对路径"),
-			"format":  strProp("jsonl (默认) / markdown / html"),
-			"talker":  strProp("可选: 限定会话对象"),
-			"chat":    strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
-			"after":   strProp("可选: 起始时间"),
-			"before":  strProp("可选: 截止时间"),
-			"keyword": strProp("可选: 内容关键词"),
-			"limit":   intProp("最大导出条数 (默认 10000)"),
+			"path":      strProp("输出文件绝对路径"),
+			"format":    enumStrProp("jsonl (默认) / markdown / html", "jsonl", "markdown", "html"),
+			"talker":    strProp("可选: 限定会话对象"),
+			"chat":      strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
+			"after":     strProp("可选: 起始时间"),
+			"before":    strProp("可选: 截止时间"),
+			"keyword":   strProp("可选: 内容关键词"),
+			"type":      strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name": strProp("可选: 同 type"),
+			"base_kind": intProp("可选: base_kind raw int"),
+			"sender":    strProp("可选: sender wxid 或昵称"),
+			"limit":     intProp("最大导出条数 (默认 10000)"),
+			"offset":    intProp("跳过条数 (默认 0)"),
 		}, []string{"path"}),
 	},
 }
@@ -821,6 +845,9 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 	if getStr(a, "talker") == "" && !looksLikeRawChatID(talker) {
 		return nil, fmt.Errorf("chat %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw talker/wxid", talker)
 	}
+	if messagesHasCacheOnlyFilters(a) {
+		return nil, fmt.Errorf("messages filters type/kind_name/base_kind/sender require cache index; run `wx-mcp cache refresh` first")
+	}
 	if aggregatorSessions[talker] {
 		return nil, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
 	}
@@ -924,6 +951,15 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 	return liteMessages(rows, mode), nil
 }
 
+func messagesHasCacheOnlyFilters(a map[string]any) bool {
+	for _, k := range []string{"type", "kind_name", "sender"} {
+		if getStr(a, k) != "" {
+			return true
+		}
+	}
+	return getInt(a, "base_kind", 0) != 0
+}
+
 // liteMessages strips raw XML / parsed / source / housekeeping fields when
 // mode=lite. Keeps the 8 fields that matter for human-readable summarization
 // (typical 100-row response: ~250KB full → ~12KB lite, ~95% reduction).
@@ -960,12 +996,16 @@ func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 	if !looksLikeRawChatID(target) {
 		if cdb, err := s.openCacheIndex(false); err == nil {
 			cp := map[string]any{"chat": target, "type_filter": "group"}
-			if resolved, rerr := resolveTalkerForCache(cdb, cp, true); rerr == nil {
-				target = resolved
-			}
+			resolved, rerr := resolveTalkerForCache(cdb, cp, true)
 			cdb.Close()
+			if rerr != nil {
+				return nil, rerr
+			}
+			target = resolved
 		} else if errors.Is(err, errCacheMissing) {
 			return nil, fmt.Errorf("chat %q requires cache index for group-name resolution; run `wx-mcp cache refresh` first or pass raw chatroom_id", target)
+		} else {
+			return nil, err
 		}
 	}
 	db, err := s.openDB("contact", "contact.db")
@@ -1248,6 +1288,13 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 	if kw == "" {
 		return nil, fmt.Errorf("keyword is required")
 	}
+	mode := searchMode(a)
+	if mode == "fts" {
+		return nil, fmt.Errorf("search_mode=fts requires cache index; run `wx-mcp cache refresh` first or pass search_mode=like for legacy direct search")
+	}
+	if searchHasCacheOnlyFilters(a) {
+		return nil, fmt.Errorf("search filters chat/talker/after/before/type/kind_name/base_kind/sender require cache index; run `wx-mcp cache refresh` first")
+	}
 	limit := getInt(a, "limit", 20)
 	like := "%" + kw + "%"
 
@@ -1298,12 +1345,25 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 	s.attachDisplayNames(rows,
 		[2]string{"talker", "talker_display_name"},
 		[2]string{"sender_wxid", "sender_display_name"})
-	for _, r := range rows {
-		if c, ok := r["content"].(string); ok {
-			r["content"] = senderPrefixRe.ReplaceAllString(c, "")
+	decorateMessageSearchRows(rows)
+	return rows, nil
+}
+
+func searchMode(a map[string]any) string {
+	mode := getStr(a, "search_mode")
+	if mode == "" {
+		return "fts"
+	}
+	return mode
+}
+
+func searchHasCacheOnlyFilters(a map[string]any) bool {
+	for _, k := range []string{"talker", "chat", "after", "before", "type", "kind_name", "sender"} {
+		if getStr(a, k) != "" {
+			return true
 		}
 	}
-	return rows, nil
+	return getInt(a, "base_kind", 0) != 0
 }
 
 // enrichSearchSender resolves sender_wxid + base_kind + kind_name for FTS
@@ -1466,20 +1526,138 @@ func (s *server) toolTransfers(a map[string]any) (any, error) {
 }
 
 func (s *server) toolRedPackets(a map[string]any) (any, error) {
+	limit := getInt(a, "limit", 50)
+	if limit <= 0 {
+		limit = 50
+	}
+	afterTS, err := parseTS(getStr(a, "after"))
+	if err != nil {
+		return nil, err
+	}
+	beforeTS, err := parseTS(getStr(a, "before"))
+	if err != nil {
+		return nil, err
+	}
+	var cacheDB *wcdb.DB
+	openCache := func() (*wcdb.DB, error) {
+		if cacheDB != nil {
+			return cacheDB, nil
+		}
+		db, err := s.openCacheIndex(false)
+		if err != nil {
+			return nil, err
+		}
+		cacheDB = db
+		return cacheDB, nil
+	}
+	defer func() {
+		if cacheDB != nil {
+			cacheDB.Close()
+		}
+	}()
+	talker := getStr(a, "talker")
+	if talker == "" && getStr(a, "chat") != "" {
+		cdb, err := openCache()
+		if err != nil {
+			return nil, fmt.Errorf("chat filter requires cache index; run `wx-mcp cache refresh` first: %w", err)
+		}
+		resolved, err := resolveTalkerForCache(cdb, a, true)
+		if err != nil {
+			return nil, err
+		}
+		talker = resolved
+	}
+	senderFilter := getStr(a, "sender")
+	if senderFilter != "" && !looksLikeRawChatID(senderFilter) {
+		cdb, err := openCache()
+		if err != nil {
+			return nil, fmt.Errorf("sender filter requires cache index; run `wx-mcp cache refresh` first: %w", err)
+		}
+		cands, err := resolveChatCandidates(cdb, senderFilter, "", 1)
+		if err != nil {
+			return nil, err
+		}
+		if len(cands) == 0 {
+			return nil, fmt.Errorf("sender %q not found; call resolve_chat first to inspect candidates", senderFilter)
+		}
+		senderFilter = cands[0].Username
+	}
+	needsMessageMeta := afterTS > 0 || beforeTS > 0
+	if needsMessageMeta {
+		if _, err := openCache(); err != nil {
+			return nil, fmt.Errorf("red_packets time filters require cache index; run `wx-mcp cache refresh` first: %w", err)
+		}
+	}
 	db, err := s.openDB("general", "general.db")
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT send_id,
-		sender_user_name AS sender_wxid,
-		session_name AS session_username,
-		native_url, message_server_id
-		FROM redEnvelopeTable
-		ORDER BY rowid DESC
-		LIMIT ?`, getInt(a, "limit", 50))
+	var where []string
+	var args []any
+	if talker != "" {
+		where = append(where, "session_name = ?")
+		args = append(args, talker)
+	}
+	if senderFilter != "" {
+		where = append(where, "sender_user_name = ?")
+		args = append(args, senderFilter)
+	}
+	wc := ""
+	if len(where) > 0 {
+		wc = "WHERE " + strings.Join(where, " AND ")
+	}
+	fetchLimit := limit
+	if needsMessageMeta {
+		fetchLimit = 50000
+	}
+	args = append(args, fetchLimit)
+	rows, err := db.Query(fmt.Sprintf(`SELECT send_id,
+			sender_user_name AS sender_wxid,
+			session_name AS session_username,
+			native_url, message_server_id
+			FROM redEnvelopeTable %s
+			ORDER BY rowid DESC
+			LIMIT ?`, wc), args...)
 	if err != nil {
 		return nil, err
+	}
+	if needsMessageMeta {
+		meta := cacheMessageMeta(cacheDB, rows, "message_server_id", "session_username")
+		filtered := rows[:0]
+		for _, r := range rows {
+			if m, ok := meta[messagePairKey(rowString(r, "session_username"), rowInt64(r, "message_server_id"))]; ok {
+				r["create_time"] = rowInt64(m, "create_time")
+				r["create_time_human"] = rowString(m, "create_time_human")
+				if sw := rowString(m, "sender_wxid"); sw != "" {
+					r["message_sender_wxid"] = sw
+				}
+				if sd := rowString(m, "sender_display_name"); sd != "" {
+					r["message_sender_display_name"] = sd
+				}
+			}
+			ct := rowInt64(r, "create_time")
+			if (afterTS > 0 || beforeTS > 0) && ct == 0 {
+				continue
+			}
+			if afterTS > 0 && ct < afterTS {
+				continue
+			}
+			if beforeTS > 0 && ct >= beforeTS {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		sort.Slice(filtered, func(i, j int) bool {
+			if rowInt64(filtered[i], "create_time") != rowInt64(filtered[j], "create_time") {
+				return rowInt64(filtered[i], "create_time") > rowInt64(filtered[j], "create_time")
+			}
+			return rowInt64(filtered[i], "message_server_id") > rowInt64(filtered[j], "message_server_id")
+		})
+		if len(filtered) > limit {
+			filtered = filtered[:limit]
+		}
+		rows = filtered
 	}
 	contents := s.fetchMessageContent(rows, "message_server_id", "session_username")
 	for _, r := range rows {
@@ -1782,13 +1960,58 @@ type props = map[string]any
 func strProp(desc string) any  { return map[string]any{"type": "string", "description": desc} }
 func intProp(desc string) any  { return map[string]any{"type": "integer", "description": desc} }
 func boolProp(desc string) any { return map[string]any{"type": "boolean", "description": desc} }
+func enumStrProp(desc string, values ...string) any {
+	return map[string]any{"type": "string", "description": desc, "enum": values}
+}
 
 func jsonSchema(properties props, required []string) any {
-	s := map[string]any{"type": "object", "properties": properties}
+	s := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
 	if len(required) > 0 {
 		s["required"] = required
 	}
 	return s
+}
+
+func listedToolDefs() []toolDef {
+	out := make([]toolDef, len(toolDefs))
+	copy(out, toolDefs)
+	for i := range out {
+		out[i].Annotations = toolAnnotations(out[i].Name)
+	}
+	return out
+}
+
+func toolAnnotations(name string) map[string]any {
+	switch name {
+	case "cache_refresh":
+		return map[string]any{
+			"readOnlyHint":    false,
+			"destructiveHint": false,
+			"idempotentHint":  true,
+			"openWorldHint":   false,
+		}
+	case "cache_rebuild":
+		return map[string]any{
+			"readOnlyHint":    false,
+			"destructiveHint": true,
+			"idempotentHint":  true,
+			"openWorldHint":   false,
+		}
+	case "export_messages":
+		return map[string]any{
+			"readOnlyHint":    false,
+			"destructiveHint": false,
+			"idempotentHint":  false,
+			"openWorldHint":   false,
+		}
+	default:
+		return map[string]any{
+			"readOnlyHint":    true,
+			"destructiveHint": false,
+			"idempotentHint":  true,
+			"openWorldHint":   false,
+		}
+	}
 }
 
 func getStr(a map[string]any, k string) string {
@@ -1849,14 +2072,21 @@ func validateToolArgs(name string, args map[string]any) error {
 	props, _ := schema["properties"].(map[string]any)
 	for k, v := range args {
 		p, ok := props[k].(map[string]any)
-		if !ok || v == nil {
+		if !ok {
+			return fmt.Errorf("unknown argument %q for tool %s", k, name)
+		}
+		if v == nil {
 			continue
 		}
 		want, _ := p["type"].(string)
 		switch want {
 		case "string":
-			if _, ok := v.(string); !ok {
+			s, ok := v.(string)
+			if !ok {
 				return fmt.Errorf("invalid argument %q for tool %s: expected string, got %T", k, name, v)
+			}
+			if err := validateStringEnum(name, k, s, p); err != nil {
+				return err
 			}
 		case "integer":
 			n, ok := integerArgValue(v)
@@ -1873,6 +2103,40 @@ func validateToolArgs(name string, args map[string]any) error {
 			if _, ok := v.(bool); !ok {
 				return fmt.Errorf("invalid argument %q for tool %s: expected boolean, got %T", k, name, v)
 			}
+		}
+	}
+	return nil
+}
+
+func validateStringEnum(tool, key, value string, prop map[string]any) error {
+	if key == "type_filter" || key == "filter" {
+		return validateTypeFilterArg(tool, key, value)
+	}
+	raw, ok := prop["enum"].([]string)
+	if !ok || len(raw) == 0 || value == "" {
+		return nil
+	}
+	for _, allowed := range raw {
+		if value == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid argument %q for tool %s: expected one of %s, got %q", key, tool, strings.Join(raw, "/"), value)
+}
+
+var allowedChatTypes = map[string]bool{
+	"all": true, "private": true, "group": true, "official_account": true,
+	"folded": true, "bot": true, "corp_im": true, "stranger": true,
+}
+
+func validateTypeFilterArg(tool, key, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	for _, part := range strings.Split(value, ",") {
+		n := normalizeChatType(part)
+		if !allowedChatTypes[n] {
+			return fmt.Errorf("invalid argument %q for tool %s: unsupported chat type %q", key, tool, strings.TrimSpace(part))
 		}
 	}
 	return nil
@@ -1904,7 +2168,7 @@ func maxIntegerArg(tool, key string) (int64, bool) {
 	case "limit":
 		switch tool {
 		case "export_messages":
-			return 1000000, true
+			return 100000, true
 		case "new_messages", "sql":
 			return 1000, true
 		default:
@@ -2045,9 +2309,9 @@ type xmlSnsDataItem struct {
 type xmlTimeline struct {
 	ID          string     `xml:"id"`
 	Username    string     `xml:"username"`
-	CreateTime  int64      `xml:"createTime"`
+	CreateTime  string     `xml:"createTime"`
 	ContentDesc string     `xml:"contentDesc"`
-	Private     int        `xml:"private"`
+	Private     string     `xml:"private"`
 	Location    xmlLoc     `xml:"location"`
 	Content     xmlContent `xml:"ContentObject"`
 }
@@ -2057,26 +2321,36 @@ type xmlLoc struct {
 	Name string `xml:"poiName,attr"`
 }
 type xmlContent struct {
-	Type      int          `xml:"type"`
+	Type      string       `xml:"type"`
 	MediaList xmlMediaList `xml:"mediaList"`
 }
 type xmlMediaList struct {
 	Items []xmlMedia `xml:"media"`
 }
 type xmlMedia struct {
-	Type  int      `xml:"type"`
-	URL   string   `xml:"url"`
-	Thumb string   `xml:"thumb"`
-	Size  xmlMSize `xml:"size"`
+	Type          string      `xml:"type"`
+	SubType       string      `xml:"sub_type"`
+	URL           xmlMediaURL `xml:"url"`
+	Thumb         xmlMediaURL `xml:"thumb"`
+	Size          xmlMSize    `xml:"size"`
+	VideoMD5      string      `xml:"videomd5"`
+	VideoDuration string      `xml:"videoDuration"`
+}
+type xmlMediaURL struct {
+	Text   string `xml:",chardata"`
+	MD5    string `xml:"md5,attr"`
+	Key    string `xml:"key,attr"`
+	Token  string `xml:"token,attr"`
+	EncIdx string `xml:"enc_idx,attr"`
 }
 type xmlMSize struct {
-	Width  int `xml:"width,attr"`
-	Height int `xml:"height,attr"`
-	Total  int `xml:"totalSize,attr"`
+	Width  string `xml:"width,attr"`
+	Height string `xml:"height,attr"`
+	Total  string `xml:"totalSize,attr"`
 }
 type xmlLocalExtra struct {
 	Nickname string `xml:"nickname"`
-	LikeFlag int    `xml:"like_flag"`
+	LikeFlag string `xml:"like_flag"`
 }
 
 type snsPost struct {
@@ -2096,11 +2370,23 @@ type snsPost struct {
 	ParseError string     `json:"parse_error,omitempty"`
 }
 type snsMedia struct {
-	Type   string `json:"type"`
-	URL    string `json:"url"`
-	Thumb  string `json:"thumb,omitempty"`
-	Width  int    `json:"width,omitempty"`
-	Height int    `json:"height,omitempty"`
+	Type          string `json:"type"`
+	RawType       int    `json:"raw_type,omitempty"`
+	SubType       string `json:"sub_type,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Thumb         string `json:"thumb,omitempty"`
+	MD5           string `json:"md5,omitempty"`
+	URLKey        string `json:"url_key,omitempty"`
+	URLToken      string `json:"url_token,omitempty"`
+	URLEncIdx     string `json:"url_enc_idx,omitempty"`
+	ThumbKey      string `json:"thumb_key,omitempty"`
+	ThumbToken    string `json:"thumb_token,omitempty"`
+	ThumbEncIdx   string `json:"thumb_enc_idx,omitempty"`
+	Width         int    `json:"width,omitempty"`
+	Height        int    `json:"height,omitempty"`
+	TotalSize     int    `json:"total_size,omitempty"`
+	VideoMD5      string `json:"video_md5,omitempty"`
+	VideoDuration int    `json:"video_duration,omitempty"`
 }
 type snsLoc struct {
 	Name string  `json:"name"`
@@ -2126,19 +2412,27 @@ func parseSnsXML(raw string) (*snsPost, error) {
 		return nil, err
 	}
 	t := item.Timeline
+	createTime := parseXMLInt64(t.CreateTime)
+	contentType := parseXMLInt(t.Content.Type)
 	p := &snsPost{
 		TID: t.ID, Username: t.Username, Nickname: item.Local.Nickname,
-		CreateTime: t.CreateTime, Content: t.ContentDesc, Type: t.Content.Type,
-		Private: t.Private != 0, LikedByMe: item.Local.LikeFlag != 0,
+		CreateTime: createTime, Content: t.ContentDesc, Type: contentType,
+		Private: parseXMLInt(t.Private) != 0, LikedByMe: parseXMLInt(item.Local.LikeFlag) != 0,
 	}
 	for _, m := range t.Content.MediaList.Items {
+		rawType := parseXMLInt(m.Type)
 		mt := "image"
-		if m.Type != 2 {
+		if rawType != 2 {
 			mt = "video"
 		}
 		p.Media = append(p.Media, snsMedia{
-			Type: mt, URL: m.URL, Thumb: m.Thumb,
-			Width: m.Size.Width, Height: m.Size.Height,
+			Type: mt, RawType: rawType, SubType: strings.TrimSpace(m.SubType),
+			URL: strings.TrimSpace(m.URL.Text), Thumb: strings.TrimSpace(m.Thumb.Text),
+			MD5:    strings.TrimSpace(m.URL.MD5),
+			URLKey: strings.TrimSpace(m.URL.Key), URLToken: strings.TrimSpace(m.URL.Token), URLEncIdx: strings.TrimSpace(m.URL.EncIdx),
+			ThumbKey: strings.TrimSpace(m.Thumb.Key), ThumbToken: strings.TrimSpace(m.Thumb.Token), ThumbEncIdx: strings.TrimSpace(m.Thumb.EncIdx),
+			Width: parseXMLInt(m.Size.Width), Height: parseXMLInt(m.Size.Height), TotalSize: parseXMLInt(m.Size.Total),
+			VideoMD5: strings.TrimSpace(m.VideoMD5), VideoDuration: parseXMLInt(m.VideoDuration),
 		})
 	}
 	lat, _ := strconv.ParseFloat(t.Location.Lat, 64)
@@ -2147,6 +2441,24 @@ func parseSnsXML(raw string) (*snsPost, error) {
 		p.Location = &snsLoc{Name: t.Location.Name, Lat: lat, Lon: lon}
 	}
 	return p, nil
+}
+
+func parseXMLInt(s string) int {
+	return int(parseXMLInt64(s))
+}
+
+func parseXMLInt64(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int64(f)
+	}
+	return 0
 }
 
 func loadSnsInteractions(db *wcdb.DB, tids []int64) (map[int64][]snsReact, map[int64][]snsCmt) {
@@ -2284,6 +2596,46 @@ func (s *server) fetchMessageContent(rows []wcdb.Row, sidCol, talkerCol string) 
 			sid, _ := cr["server_id"].(int64)
 			content, _ := cr["message_content"].(string)
 			out[sid] = content
+		}
+	}
+	return out
+}
+
+func messagePairKey(talker string, serverID int64) string {
+	return talker + "\x00" + strconv.FormatInt(serverID, 10)
+}
+
+func cacheMessageMeta(db *wcdb.DB, rows []wcdb.Row, sidCol, talkerCol string) map[string]wcdb.Row {
+	out := map[string]wcdb.Row{}
+	if db == nil || len(rows) == 0 {
+		return out
+	}
+	byTalker := make(map[string][]int64)
+	for _, r := range rows {
+		t := rowString(r, talkerCol)
+		sid := rowInt64(r, sidCol)
+		if t == "" || sid == 0 {
+			continue
+		}
+		byTalker[t] = append(byTalker[t], sid)
+	}
+	for talker, sids := range byTalker {
+		ph := make([]string, len(sids))
+		args := make([]any, 0, len(sids)+1)
+		args = append(args, talker)
+		for i, sid := range sids {
+			ph[i] = "?"
+			args = append(args, sid)
+		}
+		metaRows, err := db.Query(fmt.Sprintf(`SELECT talker, server_id, create_time, create_time_human,
+			sender_wxid, sender_display_name
+			FROM messages_unified
+			WHERE talker = ? AND server_id IN (%s)`, strings.Join(ph, ",")), args...)
+		if err != nil {
+			continue
+		}
+		for _, mr := range metaRows {
+			out[messagePairKey(rowString(mr, "talker"), rowInt64(mr, "server_id"))] = mr
 		}
 	}
 	return out

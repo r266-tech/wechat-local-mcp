@@ -1,0 +1,31 @@
+{
+  "name": "wx-mcp",
+  "version": "1.4.3",
+  "description": "Agent-first MCP server for local WeChat 4.x data on macOS.",
+  "homepage": "https://github.com/r266-tech/wx-mcp",
+  "license": "MIT",
+  "platforms": ["darwin-arm64"],
+  "transport": {
+    "type": "stdio",
+    "command": "./wx-mcp"
+  },
+  "installer": {
+    "command": "./install.sh --all --yes --json",
+    "doctor": "./install.sh --doctor --json"
+  },
+  "runtime": {
+    "requires": [
+      "WeChat 4.x logged in on macOS",
+      "libWCDB.dylib beside wx-mcp or configured with WX_MCP_WCDB_DYLIB",
+      "cached WeChat DB key in ~/.config/wxcli/config.json"
+    ],
+    "keyBootstrap": "./wxkey bootstrap"
+  },
+  "tools": {
+    "primary": ["sessions", "resolve_chat", "messages", "search", "new_messages"],
+    "cache": ["cache_status", "cache_refresh", "cache_rebuild", "unread", "stats", "export_messages"],
+    "payments": ["transfers", "red_packets"],
+    "social": ["sns", "sns_feed", "sns_search", "sns_notifications"],
+    "diagnostic": ["schema", "sql"]
+  }
+}
