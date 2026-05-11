@@ -24,14 +24,17 @@ DIST="$SRCDIR/dist/wx-mcp-v${VERSION}-darwin-arm64"
 rm -rf "$DIST" && mkdir -p "$DIST"
 
 echo "→ building wx-mcp binary..."
-go build -o "$DIST/wx-mcp" ./cmd/wx-mcp
+# -trimpath strips build-host absolute paths from the binary; -ldflags "-s -w"
+# strips symbol/debug tables so release binaries do not leak the build
+# environment (e.g. /Users/<dev>/... or Go module cache locations).
+go build -trimpath -ldflags="-s -w" -o "$DIST/wx-mcp" ./cmd/wx-mcp
 chmod +x "$DIST/wx-mcp"
 
 echo "→ building wxkey binary..."
 if [[ -d "$WXKEY_SRC" ]]; then
-  ( cd "$WXKEY_SRC" && go build -o "$DIST/wxkey" ./cmd/wxkey )
+  ( cd "$WXKEY_SRC" && go build -trimpath -ldflags="-s -w" -o "$DIST/wxkey" ./cmd/wxkey )
 else
-  GOBIN="$DIST" go install "$WXKEY_GO_INSTALL"
+  GOFLAGS="-trimpath -ldflags=-s -w" GOBIN="$DIST" go install "$WXKEY_GO_INSTALL"
 fi
 chmod +x "$DIST/wxkey"
 
