@@ -1,7 +1,10 @@
-// Package wxkey is wx-mcp's thin client for the standalone `wxkey` CLI
-// (~/cc-workspace/mcp-servers/wxkey/). The CLI handles task_for_pid +
-// memory scan + SQLCipher verification; this package finds the binary,
-// invokes `wxkey setup`, and parses the JSON it prints to stdout.
+// Package wxkey is wx-mcp's thin client for the standalone `wxkey` CLI.
+// The CLI handles task_for_pid + memory scan + SQLCipher verification;
+// this package finds the binary,
+// invokes `wxkey setup`, and parses the JSON it prints to stdout. First-run
+// human/agent setup should usually call `wxkey bootstrap` explicitly; wx-mcp
+// keeps runtime startup on the narrower setup path so it does not silently
+// re-sign or restart WeChat.
 package wxkey
 
 import (
@@ -16,7 +19,7 @@ import (
 // FindBinary locates the wxkey CLI. Resolution order:
 //  1. $WX_KEY_BIN — explicit override
 //  2. next to the calling executable (the recommended distribution layout)
-//  3. ~/cc-workspace/mcp-servers/wxkey/wxkey (dev workspace)
+//  3. ~/cc-workspace/mcp-servers/wxkey/wxkey (local dev workspace)
 //  4. PATH lookup
 func FindBinary() (string, error) {
 	if p := os.Getenv("WX_KEY_BIN"); p != "" {
@@ -39,7 +42,7 @@ func FindBinary() (string, error) {
 	if p, err := exec.LookPath("wxkey"); err == nil {
 		return p, nil
 	}
-	return "", fmt.Errorf("wxkey binary not found — set $WX_KEY_BIN, install alongside wx-mcp, or run `go build` in ~/cc-workspace/mcp-servers/wxkey/")
+	return "", fmt.Errorf("wxkey binary not found — set $WX_KEY_BIN, install wxkey alongside wx-mcp, or put wxkey on PATH")
 }
 
 // SetupResult mirrors what `wxkey setup` writes to stdout. We only consume
@@ -64,6 +67,8 @@ type ResultEntry struct {
 
 // RunSetup invokes `wxkey setup` and parses its JSON output. The CLI handles
 // admin elevation via osascript on its own — we just shell out and read JSON.
+// It intentionally does not run `wxkey bootstrap`, because bootstrap may quit,
+// ad-hoc re-sign, and reopen WeChat.
 // stderrText is also returned so wx-mcp can surface progress / errors.
 func RunSetup() (*SetupResult, string, error) {
 	bin, err := FindBinary()

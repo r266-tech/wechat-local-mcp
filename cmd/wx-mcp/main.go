@@ -34,10 +34,10 @@ type rpcRequest struct {
 }
 
 type rpcResponse struct {
-	JSONRPC string   `json:"jsonrpc"`
-	ID      any      `json:"id"`
-	Result  any      `json:"result,omitempty"`
-	Error   *rpcErr  `json:"error,omitempty"`
+	JSONRPC string  `json:"jsonrpc"`
+	ID      any     `json:"id"`
+	Result  any     `json:"result,omitempty"`
+	Error   *rpcErr `json:"error,omitempty"`
 }
 
 type rpcErr struct {
@@ -79,6 +79,9 @@ type server struct {
 //  2. ~/.config/wxcli/lib/ (shared install)
 func findWCDB() (string, error) {
 	var candidates []string
+	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_DYLIB")); p != "" {
+		candidates = append(candidates, p)
+	}
 	if exe, err := os.Executable(); err == nil {
 		if exe, err = filepath.EvalSymlinks(exe); err == nil {
 			dir := filepath.Dir(exe)
@@ -93,12 +96,13 @@ func findWCDB() (string, error) {
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".config", "wxcli", "lib", "libWCDB.dylib"))
 	}
+	candidates = append(candidates, "/Applications/WeFlow.app/Contents/Resources/resources/wcdb/macos/universal/libWCDB.dylib")
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib) 或 ~/.config/wxcli/lib/")
+	return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WX_MCP_WCDB_DYLIB")
 }
 
 func (s *server) ensure() error {
@@ -128,7 +132,7 @@ func (s *server) ensure() error {
 		fmt.Fprintln(os.Stderr, "[wx-mcp] no DB key cached — running `wxkey setup` (admin prompt may appear)...")
 		res, stderr, err := wxkey.RunSetup()
 		if err != nil {
-			return fmt.Errorf("wxkey setup failed: %w\n%s", err, stderr)
+			return fmt.Errorf("wxkey setup failed: %w\n%s\nFor first-run no-SIP setup, run `./wxkey bootstrap` in the wx-mcp directory, then restart wx-mcp.", err, stderr)
 		}
 		// wxkey writes the config itself; reload to pick up the new keys map.
 		fresh, err := config.Load()
@@ -152,31 +156,10 @@ func (s *server) openDB(subdir, file string) (*wcdb.DB, error) {
 	if err := wcdb.Bootstrap(s.wcdbPath); err != nil {
 		return nil, err
 	}
-	dbStorage := filepath.Join(s.cfg.DBRoot, "db_storage")
-	dbPath := filepath.Clean(filepath.Join(dbStorage, subdir, file))
-	// Containment layer 1 (lexical): catch obvious `..` / absolute escape before
-	// any FS call. Defense in depth — readonly is not a scope.
-	rel, err := filepath.Rel(dbStorage, dbPath)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return nil, fmt.Errorf("path escapes db_storage: subdir=%q file=%q", subdir, file)
-	}
-	// Containment layer 2 (resolved): catch symlink escape — a planted symlink
-	// under db_storage could point anywhere on disk and lexical check wouldn't
-	// see it. EvalSymlinks both ends and re-check rel against resolved root.
-	resolvedStorage, err := filepath.EvalSymlinks(dbStorage)
+	resolvedDB, err := s.validatedDBPath(subdir, file)
 	if err != nil {
-		return nil, fmt.Errorf("resolve db_storage: %w", err)
+		return nil, err
 	}
-	resolvedDB, err := filepath.EvalSymlinks(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve db path: %w", err)
-	}
-	relReal, err := filepath.Rel(resolvedStorage, resolvedDB)
-	if err != nil || strings.HasPrefix(relReal, "..") || filepath.IsAbs(relReal) {
-		return nil, fmt.Errorf("path escapes db_storage after symlink resolution: subdir=%q file=%q", subdir, file)
-	}
-	// Pass resolvedDB (real path) to wcdb so the file we validated is the file
-	// that gets opened — closes any TOCTOU window between check and open.
 	if len(s.cfg.Keys) > 0 {
 		// Prefer schema-2 enc_key per salt; fall back to legacy master password
 		// for DBs whose key didn't land in WeChat's heap during the scan.
@@ -184,6 +167,35 @@ func (s *server) openDB(subdir, file string) (*wcdb.DB, error) {
 	}
 	// Pure schema-1 (legacy) — slow PBKDF2 on every open.
 	return wcdb.Open(resolvedDB, s.cfg.Key)
+}
+
+func (s *server) validatedDBPath(subdir, file string) (string, error) {
+	dbStorage := filepath.Join(s.cfg.DBRoot, "db_storage")
+	dbPath := filepath.Clean(filepath.Join(dbStorage, subdir, file))
+	// Containment layer 1 (lexical): catch obvious `..` / absolute escape before
+	// any FS call. Defense in depth — readonly is not a scope.
+	rel, err := filepath.Rel(dbStorage, dbPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path escapes db_storage: subdir=%q file=%q", subdir, file)
+	}
+	// Containment layer 2 (resolved): catch symlink escape — a planted symlink
+	// under db_storage could point anywhere on disk and lexical check wouldn't
+	// see it. EvalSymlinks both ends and re-check rel against resolved root.
+	resolvedStorage, err := filepath.EvalSymlinks(dbStorage)
+	if err != nil {
+		return "", fmt.Errorf("resolve db_storage: %w", err)
+	}
+	resolvedDB, err := filepath.EvalSymlinks(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve db path: %w", err)
+	}
+	relReal, err := filepath.Rel(resolvedStorage, resolvedDB)
+	if err != nil || strings.HasPrefix(relReal, "..") || filepath.IsAbs(relReal) {
+		return "", fmt.Errorf("path escapes db_storage after symlink resolution: subdir=%q file=%q", subdir, file)
+	}
+	// Pass resolvedDB (real path) to wcdb so the file we validated is the file
+	// that gets opened — closes any TOCTOU window between check and open.
+	return resolvedDB, nil
 }
 
 // msgShardRE matches message / biz_message shard filenames.
@@ -224,6 +236,13 @@ func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
 // ──────────────────── main loop ────────────────────
 
 func main() {
+	if len(os.Args) > 1 {
+		if maybeRunCLI(os.Args[1:]) {
+			return
+		}
+		printCLIUsage()
+		os.Exit(2)
+	}
 	srv := &server{}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 4*1024*1024), 4*1024*1024)
@@ -272,10 +291,14 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 func (s *server) callTool(p toolCallParams) toolResult {
 	handlers := map[string]func(map[string]any) (any, error){
 		"sessions":               s.toolSessions,
+		"resolve_chat":           s.toolResolveChat,
 		"contacts":               s.toolContacts,
 		"messages":               s.toolMessages,
 		"group_members":          s.toolGroupMembers,
 		"sns":                    s.toolSns,
+		"sns_feed":               s.toolSnsFeed,
+		"sns_search":             s.toolSnsSearch,
+		"sns_notifications":      s.toolSnsNotifications,
 		"search":                 s.toolSearch,
 		"sql":                    s.toolSQL,
 		"transfers":              s.toolTransfers,
@@ -284,6 +307,13 @@ func (s *server) callTool(p toolCallParams) toolResult {
 		"chatroom_announcements": s.toolChatroomAnnouncements,
 		"forward_history":        s.toolForwardHistory,
 		"schema":                 s.toolSchema,
+		"cache_status":           s.toolCacheStatus,
+		"cache_refresh":          s.toolCacheRefresh,
+		"cache_rebuild":          s.toolCacheRebuild,
+		"unread":                 s.toolUnread,
+		"new_messages":           s.toolNewMessages,
+		"stats":                  s.toolStats,
+		"export_messages":        s.toolExportMessages,
 	}
 	fn, ok := handlers[p.Name]
 	if !ok {
@@ -307,27 +337,36 @@ var toolDefs = []toolDef{
 	{
 		Name: "sessions",
 		Description: "聊天会话列表, 按 sort_timestamp DESC. " +
-			"字段: username / display_name / unread_count / summary (末条预览) / " +
+			"字段: username / display_name / chat_type (private/group/official_account/folded/bot/...) / unread_count / summary (末条预览) / " +
 			"sort_timestamp (含置顶调整, 用于排序) / last_timestamp (最新消息实际时间, 多数情况两者相等) / " +
 			"last_sender_wxid / last_sender_display_name / " +
 			"last_msg_type (base_kind raw int) / last_msg_sub_type (subtype raw int) / " +
 			"last_msg_kind_name (resolved: text/image/voice/card/video/sticker/location/voip/system, " +
 			"app 子类 link/file/music/quote/transfer/red_packet/miniprogram/forward_chat/announcement/pat/channel_video). " +
-			"type_filter 识别: group=@chatroom 后缀, official_account=gh_ 前缀, " +
-			"bot=@weclaw 后缀, friend=其他. keyword 匹配 username / summary / " +
+			"type_filter 支持 all/private(friend)/group/official_account(official)/folded/bot, 可逗号分隔. keyword 匹配 username / summary / " +
 			"display_name / nick_name / remark / alias (大小写无关, 空格无关).",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
-			"type_filter": strProp("all (默认) / group / friend / official_account / bot"),
+			"type_filter": strProp("all (默认) / private / group / official_account / folded / bot, 可逗号分隔"),
 			"keyword":     strProp("模糊搜索"),
 		}, nil),
+	},
+	{
+		Name: "resolve_chat",
+		Description: "把昵称/备注/alias/群名/微信号解析成 wx-mcp 可用的 username/talker. " +
+			"当 agent 只知道人名或群名时先调这个; 返回 candidates 按精确匹配和最近会话排序.",
+		InputSchema: jsonSchema(props{
+			"query":       strProp("要解析的人名/群名/微信号"),
+			"type_filter": strProp("可选: private / group / official_account / folded / bot, 可逗号分隔"),
+			"limit":       intProp("候选数量 (默认 10)"),
+		}, []string{"query"}),
 	},
 	{
 		Name: "contacts",
 		Description: "搜索微信联系人或群. 不传 keyword 则列出全部. " +
 			"字段: username / display_name (remark > nick_name > username) / nick_name / " +
 			"remark (omitempty) / alias (omitempty, 微信号) / description (omitempty, 个性签名/群简介) / " +
-			"type (friend/group/official_account/corp_im/clawbot/stranger/other, 由 username 规则推导) / " +
+			"type (friend/group/official_account/corp_im/clawbot/stranger/other, 由 username 规则推导) / chat_type / " +
 			"is_verified (bool, 公众号/服务号/认证账号).",
 		InputSchema: jsonSchema(props{
 			"keyword":      strProp("模糊搜索 (匹配 wxid/昵称/备注/alias/拼音首字母)"),
@@ -338,9 +377,9 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "messages",
-		Description: "会话消息. talker 是 wxid 或 xxx@chatroom. " +
+		Description: "会话消息. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wx-mcp 自动解析. " +
 			"fields=lite (默认) 返回: local_id / server_id / create_time / create_time_human / " +
-			"sender_wxid / sender_display_name / is_from_me / base_kind / kind_name / content_summary " +
+			"talker / talker_display_name / chat_type / sender_wxid / sender_display_name / is_from_me / base_kind / kind_name / content_summary " +
 			"(群聊已剥 'wxid:\\n' 前缀). " +
 			"fields=full 额外返回: subtype / message_content (raw 文本/XML) / " +
 			"message_content_parsed (图/表情/app XML 结构化, 引用递归 depth=3). " +
@@ -352,13 +391,14 @@ var toolDefs = []toolDef{
 			"after/before 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
 			"talker":  strProp("会话对象 (wxid 或 xxx@chatroom)"),
+			"chat":    strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
 			"limit":   intProp("返回条数 (默认 50)"),
 			"offset":  intProp("跳过条数 (默认 0)"),
 			"after":   strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"before":  strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"keyword": strProp("消息内容关键词"),
 			"fields":  strProp("lite (默认) / full"),
-		}, []string{"talker"}),
+		}, nil),
 	},
 	{
 		Name: "group_members",
@@ -367,10 +407,11 @@ var toolDefs = []toolDef{
 			"stats=true 附 msg_count (扫消息表较慢).",
 		InputSchema: jsonSchema(props{
 			"chatroom_id": strProp("群 ID (xxx@chatroom)"),
+			"chat":        strProp("群名/备注; chatroom_id 为空时自动解析"),
 			"stats":       boolProp("附带每人发言条数 (扫消息表, 较慢)"),
 			"limit":       intProp("返回条数 (默认 100)"),
 			"offset":      intProp("跳过条数 (默认 0)"),
-		}, []string{"chatroom_id"}),
+		}, nil),
 	},
 	{
 		Name: "sns",
@@ -390,15 +431,56 @@ var toolDefs = []toolDef{
 		}, nil),
 	},
 	{
+		Name:        "sns_feed",
+		Description: "朋友圈时间线, 等价于 sns 但语义更明确. 支持 user/keyword/after/before/limit/offset.",
+		InputSchema: jsonSchema(props{
+			"keyword": strProp("正文关键词"),
+			"user":    strProp("按发布者 wxid 过滤"),
+			"after":   strProp("起始时间 (unix秒 或 2006-01-02)"),
+			"before":  strProp("截止时间 (unix秒 或 2006-01-02)"),
+			"limit":   intProp("返回条数 (默认 20)"),
+			"offset":  intProp("跳过条数 (默认 0)"),
+		}, nil),
+	},
+	{
+		Name:        "sns_search",
+		Description: "朋友圈正文全文搜索. 返回字段同 sns_feed, keyword 必填.",
+		InputSchema: jsonSchema(props{
+			"keyword": strProp("正文关键词"),
+			"user":    strProp("按发布者 wxid 过滤"),
+			"after":   strProp("起始时间 (unix秒 或 2006-01-02)"),
+			"before":  strProp("截止时间 (unix秒 或 2006-01-02)"),
+			"limit":   intProp("返回条数 (默认 20)"),
+			"offset":  intProp("跳过条数 (默认 0)"),
+		}, []string{"keyword"}),
+	},
+	{
+		Name:        "sns_notifications",
+		Description: "朋友圈互动通知: 点赞/评论. 默认仅未读; include_read=true 返回已读+未读.",
+		InputSchema: jsonSchema(props{
+			"include_read": boolProp("包含已读通知"),
+			"after":        strProp("起始时间 (unix秒 或 2006-01-02)"),
+			"before":       strProp("截止时间 (unix秒 或 2006-01-02)"),
+			"limit":        intProp("返回条数 (默认 50)"),
+		}, nil),
+	},
+	{
 		Name: "search",
-		Description: "跨会话消息全文搜索 (4 FTS 分区 UNION ALL + 全局时间倒序). " +
-			"字段: content (群聊已剥 'wxid:\\n' 前缀) / local_id / talker / talker_display_name / " +
+		Description: "跨会话消息全文搜索. cache 存在时走 wx-mcp 自建 FTS, 支持 chat/talker/after/before/type/sender 过滤. " +
+			"字段: content (群聊已剥 'wxid:\\n' 前缀) / local_id / talker / talker_display_name / chat_type / " +
 			"create_time / sender_wxid / sender_display_name / base_kind / kind_name. " +
 			"sender + base_kind/kind_name 来自 join 回 Msg_<hash>(talker), 部分命中可能因 shard 路由失败缺这几字段. " +
 			"FTS 索引可能落后实时几分钟.",
 		InputSchema: jsonSchema(props{
-			"keyword": strProp("搜索关键词"),
-			"limit":   intProp("返回条数 (默认 20)"),
+			"keyword":   strProp("搜索关键词"),
+			"talker":    strProp("可选: 限定 wxid 或 xxx@chatroom"),
+			"chat":      strProp("可选: 限定昵称/备注/群名, 自动解析为 talker"),
+			"after":     strProp("可选: 起始时间"),
+			"before":    strProp("可选: 截止时间"),
+			"type":      strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name": strProp("可选: 同 type"),
+			"sender":    strProp("可选: sender wxid 或昵称"),
+			"limit":     intProp("返回条数 (默认 20)"),
 		}, []string{"keyword"}),
 	},
 	{
@@ -483,11 +565,81 @@ var toolDefs = []toolDef{
 			"file":   strProp("数据库文件名"),
 		}, nil),
 	},
+	{
+		Name:        "cache_status",
+		Description: "查看 wx-mcp 明文 snapshot cache 与统一 index.sqlite 状态. 不触发 wxkey setup.",
+		InputSchema: jsonSchema(props{}, nil),
+	},
+	{
+		Name: "cache_refresh",
+		Description: "刷新明文 DB snapshot cache 并重建统一 index.sqlite. " +
+			"默认按 DB/WAL mtime 复用未变化 snapshot; force=true 强制重解所有可读 DB.",
+		InputSchema: jsonSchema(props{
+			"force": boolProp("强制重建所有 plaintext snapshots"),
+		}, nil),
+	},
+	{
+		Name:        "cache_rebuild",
+		Description: "删除当前 wx-mcp cache 目录后完整重建 snapshot cache + index.sqlite.",
+		InputSchema: jsonSchema(props{}, nil),
+	},
+	{
+		Name:        "unread",
+		Description: "未读会话列表. cache-first; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
+		InputSchema: jsonSchema(props{
+			"limit":       intProp("返回条数 (默认 50)"),
+			"type_filter": strProp("all/private/group/official_account/folded/bot, 可逗号分隔"),
+			"filter":      strProp("type_filter 的别名, 兼容 wx-cli 风格"),
+		}, nil),
+	},
+	{
+		Name: "new_messages",
+		Description: "从 cache index 增量拉新消息. cursor 使用上次返回的 next_cursor; " +
+			"也可用 after 指定 unix秒/日期. 返回 messages + next_cursor.",
+		InputSchema: jsonSchema(props{
+			"talker": strProp("可选: 限定会话对象"),
+			"chat":   strProp("可选: 限定昵称/备注/群名, 自动解析为 talker"),
+			"after":  strProp("可选: 起始时间 (unix秒 或 2006-01-02)"),
+			"cursor": strProp("可选: 上次返回的 next_cursor"),
+			"limit":  intProp("返回条数 (默认 100, 最大 1000)"),
+			"fields": strProp("lite (默认) / full"),
+		}, nil),
+	},
+	{
+		Name: "stats",
+		Description: "基于 cache index 的统计. 不传 chat/talker 返回全局 top talkers/senders/kinds/daily; " +
+			"传 chat/talker 返回单会话 by_sender/by_kind/daily/hourly. 支持 after/before.",
+		InputSchema: jsonSchema(props{
+			"chat":   strProp("可选: 昵称/备注/群名"),
+			"talker": strProp("可选: wxid 或 xxx@chatroom"),
+			"after":  strProp("可选: 起始时间"),
+			"before": strProp("可选: 截止时间"),
+			"limit":  intProp("每组统计返回条数 (默认 10)"),
+		}, nil),
+	},
+	{
+		Name: "export_messages",
+		Description: "从 cache index 导出消息到本地文件. format=jsonl/markdown/html. " +
+			"支持 talker/after/before/keyword/limit 过滤.",
+		InputSchema: jsonSchema(props{
+			"path":    strProp("输出文件绝对路径"),
+			"format":  strProp("jsonl (默认) / markdown / html"),
+			"talker":  strProp("可选: 限定会话对象"),
+			"chat":    strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
+			"after":   strProp("可选: 起始时间"),
+			"before":  strProp("可选: 截止时间"),
+			"keyword": strProp("可选: 内容关键词"),
+			"limit":   intProp("最大导出条数 (默认 10000)"),
+		}, []string{"path"}),
+	},
 }
 
 // ──────────────────── tool handlers ────────────────────
 
 func (s *server) toolSessions(a map[string]any) (any, error) {
+	if rows, ok, err := s.cacheSessions(a); ok || err != nil {
+		return rows, err
+	}
 	db, err := s.openDB("session", "session.db")
 	if err != nil {
 		return nil, err
@@ -546,6 +698,8 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		bk, _ := r["last_msg_type"].(int64)
 		st, _ := r["last_msg_sub_type"].(int64)
 		r["last_msg_kind_name"] = wxkind.Resolve(int32(bk), int32(st))
+		u, _ := r["username"].(string)
+		r["chat_type"] = agentChatType(u, wxkind.ClassifyUsername(u), false)
 		// Aggregator sessions (brandsessionholder / brandservicesessionholder)
 		// wrap the real sender in "_$_CUSTOM_USERNAME_PREFIX_$_<aggId>:<realId>".
 		// The aggId is UI-internal noise; keep only the real wxid / gh_ id.
@@ -626,9 +780,11 @@ func (s *server) toolContacts(a map[string]any) (any, error) {
 	}
 	for _, r := range rows {
 		u, _ := r["username"].(string)
-		r["type"] = wxkind.ClassifyUsername(u)
+		typ := wxkind.ClassifyUsername(u)
+		r["type"] = typ
 		vf, _ := r["verify_flag"].(int64)
 		r["is_verified"] = vf != 0
+		r["chat_type"] = agentChatType(u, typ, vf != 0)
 		delete(r, "verify_flag")
 		for _, k := range []string{"alias", "remark", "description"} {
 			if v, ok := r[k].(string); ok && v == "" {
@@ -640,9 +796,15 @@ func (s *server) toolContacts(a map[string]any) (any, error) {
 }
 
 func (s *server) toolMessages(a map[string]any) (any, error) {
+	if rows, ok, err := s.cacheMessages(a); ok || err != nil {
+		return rows, err
+	}
 	talker := getStr(a, "talker")
 	if talker == "" {
-		return nil, fmt.Errorf("talker is required")
+		talker = getStr(a, "chat")
+	}
+	if talker == "" {
+		return nil, fmt.Errorf("talker or chat is required")
 	}
 	if aggregatorSessions[talker] {
 		return nil, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
@@ -774,7 +936,19 @@ func liteMessages(rows []wcdb.Row, mode string) []wcdb.Row {
 func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 	target := getStr(a, "chatroom_id")
 	if target == "" {
-		return nil, fmt.Errorf("chatroom_id is required")
+		target = getStr(a, "chat")
+	}
+	if target == "" {
+		return nil, fmt.Errorf("chatroom_id or chat is required")
+	}
+	if !looksLikeRawChatID(target) {
+		if cdb, err := s.openCacheIndex(false); err == nil {
+			cp := map[string]any{"chat": target, "type_filter": "group"}
+			if resolved, rerr := resolveTalkerForCache(cdb, cp, true); rerr == nil {
+				target = resolved
+			}
+			cdb.Close()
+		}
 	}
 	db, err := s.openDB("contact", "contact.db")
 	if err != nil {
@@ -948,7 +1122,110 @@ func (s *server) toolSns(a map[string]any) (any, error) {
 	return posts, nil
 }
 
+func (s *server) toolSnsFeed(a map[string]any) (any, error) {
+	return s.toolSns(a)
+}
+
+func (s *server) toolSnsSearch(a map[string]any) (any, error) {
+	if getStr(a, "keyword") == "" {
+		return nil, fmt.Errorf("keyword is required")
+	}
+	return s.toolSns(a)
+}
+
+func (s *server) toolSnsNotifications(a map[string]any) (any, error) {
+	db, err := s.openDB("sns", "sns.db")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	var where []string
+	var args []any
+	if !getBool(a, "include_read") {
+		where = append(where, "is_unread != 0")
+	}
+	if t := getStr(a, "after"); t != "" {
+		ts, err := parseTS(t)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "create_time >= ?")
+		args = append(args, ts)
+	}
+	if t := getStr(a, "before"); t != "" {
+		ts, err := parseTS(t)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "create_time < ?")
+		args = append(args, ts)
+	}
+	wc := ""
+	if len(where) > 0 {
+		wc = "WHERE " + strings.Join(where, " AND ")
+	}
+	limit := getInt(a, "limit", 50)
+	args = append(args, limit)
+	rows, err := db.Query(fmt.Sprintf(`SELECT local_id, create_time, type, feed_id, is_unread,
+		from_username, from_nickname, to_username, to_nickname, content
+		FROM SnsMessage_tmp3 %s ORDER BY create_time DESC, local_id DESC LIMIT ?`, wc), args...)
+	if err != nil {
+		return nil, err
+	}
+	feedIDs := make(map[int64]bool)
+	for _, r := range rows {
+		if fid := rowInt64(r, "feed_id"); fid != 0 {
+			feedIDs[fid] = true
+		}
+		typ := rowInt64(r, "type")
+		if typ == 1 {
+			r["notification_type"] = "like"
+		} else {
+			r["notification_type"] = "comment"
+		}
+		r["is_unread"] = rowInt64(r, "is_unread") != 0
+	}
+	feeds := s.loadSnsFeedPreview(db, feedIDs)
+	for _, r := range rows {
+		if f, ok := feeds[rowInt64(r, "feed_id")]; ok {
+			r["feed_author_username"] = f.Username
+			r["feed_author"] = f.Nickname
+			r["feed_preview"] = f.Content
+		}
+	}
+	return rows, nil
+}
+
+func (s *server) loadSnsFeedPreview(db *wcdb.DB, ids map[int64]bool) map[int64]*snsPost {
+	out := map[int64]*snsPost{}
+	if len(ids) == 0 {
+		return out
+	}
+	ph := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids))
+	for id := range ids {
+		ph = append(ph, "?")
+		args = append(args, id)
+	}
+	rows, err := db.Query(fmt.Sprintf("SELECT tid, content FROM SnsTimeLine WHERE tid IN (%s)", strings.Join(ph, ",")), args...)
+	if err != nil {
+		return out
+	}
+	for _, r := range rows {
+		tid := rowInt64(r, "tid")
+		p, err := parseSnsXML(rowString(r, "content"))
+		if err != nil || p == nil {
+			continue
+		}
+		out[tid] = p
+	}
+	return out
+}
+
 func (s *server) toolSearch(a map[string]any) (any, error) {
+	if rows, ok, err := s.cacheSearch(a); ok || err != nil {
+		return rows, err
+	}
 	kw := getStr(a, "keyword")
 	if kw == "" {
 		return nil, fmt.Errorf("keyword is required")
