@@ -23,6 +23,11 @@ Agent-first 入口:
 
 这个入口面向"把 GitHub 链接或 zip 丢给 agent"的场景: 安装/构建 binary, 复制 `libWCDB.dylib`, 注册 Claude MCP, 跑 `wxkey bootstrap`, 刷新 cache, 并按需安装 launchd watcher. 所有结果都以 JSON 输出, 失败时看 `errors[]` 和 `log`.
 
+> **首次取 key 必须有桌面用户在场.** `wxkey bootstrap` 用 `task_for_pid` 读微信进程内存, macOS 要求 admin 权限. wxkey 会自动通过 osascript 弹 macOS 系统密码框让你输密码, **不需要 sudo**. 但这意味着:
+> - 不要 `sudo ./install.sh` 或 `sudo wxkey bootstrap` — sudo 在非交互 shell (AI agent / pipe) 里读不到密码会失败.
+> - 不要把这一步喂给 AI agent 的非交互 bash 或 SSH 远程会话 — 没桌面 GUI session, 密码框弹不出来.
+> - 正确做法: 在 Mac 本地终端直接 `./install.sh --all --yes --json` (或单独 `./wxkey bootstrap`), 看到 macOS 密码框时输密码. 之后所有运行 (cache refresh / wx-mcp 启动 / DB 解密) 都不再需要密码, 可全自动化.
+
 源码 clone 场景:
 
 ```bash

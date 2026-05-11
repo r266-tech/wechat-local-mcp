@@ -17,7 +17,7 @@ if [[ ! -f "$DYLIB_SRC" ]]; then
   exit 1
 fi
 
-WXKEY_SRC="${WXKEY_SRC:-$HOME/cc-workspace/mcp-servers/wxkey}"
+WXKEY_SRC="${WXKEY_SRC:-$SRCDIR/../wxkey}"
 WXKEY_GO_INSTALL="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2}"
 
 DIST="$SRCDIR/dist/wx-mcp-v${VERSION}-darwin-arm64"

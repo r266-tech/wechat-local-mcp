@@ -19,8 +19,7 @@ import (
 // FindBinary locates the wxkey CLI. Resolution order:
 //  1. $WX_KEY_BIN — explicit override
 //  2. next to the calling executable (the recommended distribution layout)
-//  3. ~/cc-workspace/mcp-servers/wxkey/wxkey (local dev workspace)
-//  4. PATH lookup
+//  3. PATH lookup
 func FindBinary() (string, error) {
 	if p := os.Getenv("WX_KEY_BIN"); p != "" {
 		if _, err := os.Stat(p); err == nil {
@@ -29,12 +28,6 @@ func FindBinary() (string, error) {
 	}
 	if exe, err := os.Executable(); err == nil {
 		cand := filepath.Join(filepath.Dir(exe), "wxkey")
-		if _, err := os.Stat(cand); err == nil {
-			return cand, nil
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		cand := filepath.Join(home, "cc-workspace", "mcp-servers", "wxkey", "wxkey")
 		if _, err := os.Stat(cand); err == nil {
 			return cand, nil
 		}

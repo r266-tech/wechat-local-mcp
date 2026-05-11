@@ -372,18 +372,12 @@ resolve_components() {
   elif [[ -f "$SOURCE_DIR/../wxkey/cmd/wxkey/main.go" && -n "$(command -v go 2>/dev/null)" ]]; then
     WXKEY_MODE="build"
     WXKEY_SOURCE="$SOURCE_DIR/../wxkey"
-  elif [[ -f "$HOME/cc-workspace/mcp-servers/wxkey/cmd/wxkey/main.go" && -n "$(command -v go 2>/dev/null)" ]]; then
-    WXKEY_MODE="build"
-    WXKEY_SOURCE="$HOME/cc-workspace/mcp-servers/wxkey"
   elif [[ -n "${WXKEY_BIN:-}" && -x "$WXKEY_BIN" ]]; then
     WXKEY_MODE="copy"
     WXKEY_SOURCE="$WXKEY_BIN"
   elif [[ -x "$SOURCE_DIR/../wxkey/wxkey" ]]; then
     WXKEY_MODE="copy"
     WXKEY_SOURCE="$SOURCE_DIR/../wxkey/wxkey"
-  elif [[ -x "$HOME/cc-workspace/mcp-servers/wxkey/wxkey" ]]; then
-    WXKEY_MODE="copy"
-    WXKEY_SOURCE="$HOME/cc-workspace/mcp-servers/wxkey/wxkey"
   elif have_cmd go; then
     WXKEY_MODE="go-install"
     WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.2}"
@@ -395,7 +389,7 @@ resolve_components() {
   fi
 
   local cand
-  for cand in "${WX_MCP_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib" "/Applications/WeFlow.app/Contents/Resources/resources/wcdb/macos/universal/libWCDB.dylib"; do
+  for cand in "${WX_MCP_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib"; do
     if [[ -f "$cand" ]]; then
       LIB_SOURCE="$cand"
       break
@@ -495,7 +489,14 @@ run_bootstrap() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
-  run_logged "$INSTALL_DIR/wxkey" bootstrap || die "wxkey bootstrap failed; see $INSTALL_LOG" 1
+  if ! run_logged "$INSTALL_DIR/wxkey" bootstrap; then
+    if [[ -f "$INSTALL_LOG" ]]; then
+      local trail
+      trail=$(grep -E '^\[wxkey\]|^\[FAIL\]|ERROR:|re-elevate|task_for_pid' "$INSTALL_LOG" 2>/dev/null | tail -5 | tr '\n' '|')
+      [[ -n "$trail" ]] && ERRORS+=("wxkey log tail: ${trail%|}")
+    fi
+    die "wxkey bootstrap failed; see $INSTALL_LOG. If install.sh was run through an AI agent or non-interactive shell, the macOS password prompt cannot surface — re-run \`$INSTALL_DIR/wxkey bootstrap\` directly on the Mac's desktop (no sudo)." 1
+  fi
   BOOTSTRAP_RAN=1
 }
 

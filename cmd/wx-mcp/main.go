@@ -100,7 +100,6 @@ func findWCDB() (string, error) {
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".config", "wxcli", "lib", "libWCDB.dylib"))
 	}
-	candidates = append(candidates, "/Applications/WeFlow.app/Contents/Resources/resources/wcdb/macos/universal/libWCDB.dylib")
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil

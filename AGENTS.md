@@ -2,6 +2,16 @@
 
 This repository is meant to be installed and operated by an agent for a user.
 
+> **One-time human-in-the-loop step:** `wxkey bootstrap` (run as part of
+> `install.sh --all`) needs `task_for_pid` permission. wxkey self-elevates via
+> osascript, which shows a macOS desktop password dialog that the human user
+> must respond to once. An agent cannot click through this dialog from a
+> non-interactive shell, and `sudo` will also fail because there is no tty.
+> Tell the user to run `./install.sh --all --yes --json` (or `./wxkey
+> bootstrap` alone) in a local terminal on their Mac, respond to the dialog
+> once, then all subsequent operations (cache refresh, DB decryption, MCP
+> serving) work fully unattended.
+
 ## Fast Path
 
 ```bash
