@@ -39,6 +39,13 @@ func maybeRunCLI(args []string) bool {
 		}
 		runToolCLI("messages", flags)
 		return true
+	case "media", "media-resources", "media_resources", "attachments":
+		flags := parseKVFlags(args[1:])
+		if chat := firstPositional(args[1:]); chat != "" && flags["talker"] == nil && flags["chat"] == nil {
+			flags["chat"] = chat
+		}
+		runToolCLI("media_resources", flags)
+		return true
 	case "search":
 		flags := parseKVFlags(args[1:])
 		if kw := firstPositional(args[1:]); kw != "" && flags["keyword"] == nil {
@@ -155,6 +162,8 @@ func runToolCLI(name string, flags map[string]any) {
 		result, err = srv.toolSearch(flags)
 	case "messages":
 		result, err = srv.toolMessages(flags)
+	case "media_resources":
+		result, err = srv.toolMediaResources(flags)
 	case "group_members":
 		result, err = srv.toolGroupMembers(flags)
 	case "favorites":
@@ -204,6 +213,10 @@ func parseKVFlags(args []string) map[string]any {
 				continue
 			}
 		}
+		if strings.HasSuffix(key, "_str") {
+			out[key] = val
+			continue
+		}
 		if n, err := strconv.ParseInt(val, 10, 64); err == nil {
 			out[key] = n
 			continue
@@ -250,6 +263,7 @@ Query/export CLI:
   wx-mcp sessions [--limit 20] [--type-filter private,group]
   wx-mcp resolve-chat "张三"
   wx-mcp history "张三" [--limit 50] [--after 2026-05-11]
+  wx-mcp media "张三" [--local-id 123] [--type image|video|file]
   wx-mcp search "关键词" [--in "某群"] [--after 2026-01-01] [--type text]
   wx-mcp contacts [--keyword 李]
   wx-mcp members "某群"

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -279,7 +280,7 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.3"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.4"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
 				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +
@@ -304,6 +305,7 @@ func (s *server) callTool(p toolCallParams) toolResult {
 		"resolve_chat":           s.toolResolveChat,
 		"contacts":               s.toolContacts,
 		"messages":               s.toolMessages,
+		"media_resources":        s.toolMediaResources,
 		"group_members":          s.toolGroupMembers,
 		"sns":                    s.toolSns,
 		"sns_feed":               s.toolSnsFeed,
@@ -417,6 +419,34 @@ var toolDefs = []toolDef{
 			"base_kind": intProp("可选: base_kind raw int"),
 			"sender":    strProp("可选: sender wxid 或昵称"),
 			"fields":    enumStrProp("lite (默认) / full", "lite", "full"),
+		}, nil),
+	},
+	{
+		Name: "media_resources",
+		Description: "消息附件/媒体资源定位. 读取 message_resource.db, 按 chat/talker/local_id/server_id/time/sender/type 过滤, " +
+			"返回每条消息的 server_id_str + resources[]: resource_id / resource_family(image/video/file/cover/unknown) / raw type / variant_code / size / status / " +
+			"packed_strings(文件名或 md5) / local_paths(默认包含已存在本地文件路径). " +
+			"适合 agent 在 messages/search 拿到 local_id 或 server_id 后继续定位图片、视频、文件和转发记录里的资源. " +
+			"after/before 接 unix秒 或 2006-01-02 (本地时区).",
+		InputSchema: jsonSchema(props{
+			"talker":                strProp("可选: 限定 wxid 或 xxx@chatroom"),
+			"chat":                  strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
+			"local_id":              intProp("可选: message local_id"),
+			"server_id":             intProp("可选: message server_id"),
+			"server_id_str":         strProp("可选: message server_id 字符串形式, 避免 64-bit JSON 精度损失"),
+			"message_server_id":     intProp("可选: server_id 的别名, 兼容 red_packets/transfers 输出"),
+			"message_server_id_str": strProp("可选: message_server_id 字符串形式"),
+			"after":                 strProp("可选: 起始时间"),
+			"before":                strProp("可选: 截止时间"),
+			"sender":                strProp("可选: sender wxid 或昵称"),
+			"type":                  strProp("可选: kind_name, 如 image/video/file/forward_chat/miniprogram"),
+			"kind_name":             strProp("可选: 同 type"),
+			"base_kind":             intProp("可选: base_kind raw int"),
+			"resource_family":       strProp("可选: image / video / file / cover / unknown"),
+			"resource_type_raw":     intProp("可选: MessageResourceDetail.type raw int"),
+			"include_local_paths":   boolProp("是否返回已存在本地文件路径 (默认 true)"),
+			"limit":                 intProp("返回消息条数 (默认 50)"),
+			"offset":                intProp("跳过消息条数 (默认 0)"),
 		}, nil),
 	},
 	{
@@ -983,6 +1013,528 @@ func liteMessages(rows []wcdb.Row, mode string) []wcdb.Row {
 		}
 	}
 	return rows
+}
+
+func (s *server) toolMediaResources(a map[string]any) (any, error) {
+	db, err := s.openDB("message", "message_resource.db")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	var where []string
+	var args []any
+	if talker, err := s.resolveLooseChatArg(a); err != nil {
+		return nil, err
+	} else if talker != "" {
+		where = append(where, "c.user_name = ?")
+		args = append(args, talker)
+	}
+	if sender, err := s.resolveLooseSenderArg(a); err != nil {
+		return nil, err
+	} else if sender != "" {
+		where = append(where, "sn.user_name = ?")
+		args = append(args, sender)
+	}
+	if id, ok, err := int64Arg(a, "local_id"); err != nil {
+		return nil, err
+	} else if ok {
+		where = append(where, "i.message_local_id = ?")
+		args = append(args, id)
+	}
+	if id, ok, err := mediaServerIDArg(a); err != nil {
+		return nil, err
+	} else if ok {
+		where = append(where, "i.message_svr_id = ?")
+		args = append(args, id)
+	}
+	if s := getStr(a, "after"); s != "" {
+		ts, err := parseTS(s)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "i.message_create_time >= ?")
+		args = append(args, ts)
+	}
+	if s := getStr(a, "before"); s != "" {
+		ts, err := parseTS(s)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "i.message_create_time < ?")
+		args = append(args, ts)
+	}
+	if baseKind := getInt(a, "base_kind", 0); baseKind != 0 {
+		where = append(where, "(i.message_local_type & 4294967295) = ?")
+		args = append(args, baseKind)
+	}
+	if kind := firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type")); kind != "" {
+		kwc, kargs, err := mediaKindWhere(kind, "i")
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, kwc)
+		args = append(args, kargs...)
+	}
+
+	cteResourceWhere, cteResourceArgs, err := resourceDetailWhere(a, "rd")
+	if err != nil {
+		return nil, err
+	}
+	outerResourceWhere, outerResourceArgs, err := resourceDetailWhere(a, "d")
+	if err != nil {
+		return nil, err
+	}
+	if cteResourceWhere != "" {
+		where = append(where, "EXISTS (SELECT 1 FROM MessageResourceDetail rd WHERE rd.message_id = i.message_id AND "+cteResourceWhere+")")
+		args = append(args, cteResourceArgs...)
+	}
+	wc := "1=1"
+	if len(where) > 0 {
+		wc = strings.Join(where, " AND ")
+	}
+	outerWC := ""
+	if outerResourceWhere != "" {
+		outerWC = "WHERE " + outerResourceWhere
+	}
+	limit := getInt(a, "limit", 50)
+	offset := getInt(a, "offset", 0)
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, limit, offset)
+	queryArgs = append(queryArgs, outerResourceArgs...)
+	rows, err := db.Query(fmt.Sprintf(`WITH filtered AS (
+		SELECT MAX(i.message_id) AS message_id, c.user_name AS talker, sn.user_name AS sender_wxid,
+			i.message_local_type, i.message_create_time, i.message_local_id, i.message_svr_id,
+			i.message_origin_source, i.packed_info AS message_packed_info
+		FROM MessageResourceInfo i
+		LEFT JOIN ChatName2Id c ON c.rowid = i.chat_id
+		LEFT JOIN SenderName2Id sn ON sn.rowid = i.sender_id
+		WHERE %s
+		GROUP BY c.user_name, sn.user_name, i.message_local_type, i.message_create_time,
+			i.message_local_id, i.message_svr_id, i.message_origin_source, i.packed_info
+		ORDER BY i.message_create_time DESC, i.message_local_id DESC
+		LIMIT ? OFFSET ?
+	)
+	SELECT f.message_id, f.talker, f.sender_wxid, f.message_local_type,
+		f.message_create_time, f.message_local_id, f.message_svr_id, f.message_origin_source,
+		f.message_packed_info,
+		d.resource_id, d.type AS resource_type_raw, d.size AS resource_size,
+		d.create_time AS resource_create_time, d.access_time AS resource_access_time,
+		d.status AS resource_status, d.data_index AS resource_data_index,
+		d.packed_info AS resource_packed_info
+	FROM filtered f
+	JOIN MessageResourceDetail d ON d.message_id = f.message_id
+	%s
+	ORDER BY f.message_create_time DESC, f.message_local_id DESC, d.resource_id ASC`, wc, outerWC), queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	s.attachDisplayNames(rows, [2]string{"talker", "talker_display_name"}, [2]string{"sender_wxid", "sender_display_name"})
+	return s.buildMediaResourceOutput(rows, getBoolDefault(a, "include_local_paths", true)), nil
+}
+
+func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths bool) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	byMessage := map[int64]int{}
+	self := s.selfWxid()
+	for _, r := range rows {
+		msgID := rowInt64(r, "message_id")
+		idx, ok := byMessage[msgID]
+		if !ok {
+			baseKind, subtype, kindName := wxkind.Unpack(rowInt64(r, "message_local_type"))
+			createTime := rowInt64(r, "message_create_time")
+			msgStrings := packedStrings(rowBytes(r, "message_packed_info"))
+			item := map[string]any{
+				"talker":                rowString(r, "talker"),
+				"talker_display_name":   rowString(r, "talker_display_name"),
+				"chat_type":             agentChatType(rowString(r, "talker"), wxkind.ClassifyUsername(rowString(r, "talker")), false),
+				"local_id":              rowInt64(r, "message_local_id"),
+				"server_id":             rowInt64(r, "message_svr_id"),
+				"server_id_str":         strconv.FormatInt(rowInt64(r, "message_svr_id"), 10),
+				"create_time":           createTime,
+				"create_time_human":     time.Unix(createTime, 0).Format("2006-01-02 15:04:05"),
+				"sender_wxid":           rowString(r, "sender_wxid"),
+				"sender_display_name":   rowString(r, "sender_display_name"),
+				"base_kind":             baseKind,
+				"subtype":               subtype,
+				"kind_name":             kindName,
+				"message_origin_source": rowInt64(r, "message_origin_source"),
+				"resources":             []map[string]any{},
+			}
+			if self != "" && rowString(r, "sender_wxid") != "" {
+				item["is_from_me"] = rowString(r, "sender_wxid") == self
+			}
+			if len(msgStrings) > 0 {
+				item["message_packed_strings"] = msgStrings
+			}
+			out = append(out, item)
+			idx = len(out) - 1
+			byMessage[msgID] = idx
+		}
+		res := s.mediaResourceFromRow(r, includeLocalPaths)
+		resources := out[idx]["resources"].([]map[string]any)
+		resources = append(resources, res)
+		out[idx]["resources"] = resources
+		out[idx]["resource_count"] = len(resources)
+	}
+	return out
+}
+
+func (s *server) mediaResourceFromRow(r wcdb.Row, includeLocalPaths bool) map[string]any {
+	baseKind, _, kindName := wxkind.Unpack(rowInt64(r, "message_local_type"))
+	rawType := rowInt64(r, "resource_type_raw")
+	family := mediaResourceFamily(rawType, baseKind, kindName)
+	msgStrings := packedStrings(rowBytes(r, "message_packed_info"))
+	resStrings := packedStrings(rowBytes(r, "resource_packed_info"))
+	allStrings := uniqueStrings(append(append([]string{}, msgStrings...), resStrings...))
+	md5Value := firstMD5(allStrings)
+	fileNames := fileNameStrings(allStrings)
+	res := map[string]any{
+		"resource_id":       rowInt64(r, "resource_id"),
+		"resource_family":   family,
+		"resource_type_raw": rawType,
+		"variant_code":      rawType >> 16,
+		"size":              rowInt64(r, "resource_size"),
+		"status":            rowInt64(r, "resource_status"),
+		"data_index":        rowString(r, "resource_data_index"),
+	}
+	if ct := rowInt64(r, "resource_create_time"); ct != 0 {
+		res["create_time"] = ct
+	}
+	if at := rowInt64(r, "resource_access_time"); at != 0 {
+		res["access_time"] = at
+	}
+	if len(resStrings) > 0 {
+		res["packed_strings"] = resStrings
+	}
+	if md5Value != "" {
+		res["md5"] = md5Value
+	}
+	if len(fileNames) > 0 {
+		res["file_names"] = fileNames
+		res["file_name"] = fileNames[0]
+	}
+	if includeLocalPaths {
+		res["local_paths"] = s.localMediaPaths(rowString(r, "talker"), rowInt64(r, "message_create_time"), family, md5Value, fileNames)
+	}
+	return res
+}
+
+func (s *server) localMediaPaths(talker string, createTime int64, family, md5Value string, fileNames []string) []string {
+	if s == nil || s.cfg == nil || s.cfg.DBRoot == "" || createTime == 0 {
+		return nil
+	}
+	month := time.Unix(createTime, 0).Format("2006-01")
+	var candidates []string
+	if md5Value != "" {
+		switch family {
+		case "image", "cover":
+			base := filepath.Join(s.cfg.DBRoot, "msg", "attach", talkerHash(talker), month, "Img")
+			candidates = append(candidates,
+				filepath.Join(base, md5Value+".dat"),
+				filepath.Join(base, md5Value+"_h.dat"),
+				filepath.Join(base, md5Value+"_t.dat"),
+			)
+		case "video":
+			base := filepath.Join(s.cfg.DBRoot, "msg", "video", month)
+			candidates = append(candidates,
+				filepath.Join(base, md5Value+".mp4"),
+				filepath.Join(base, md5Value+"_thumb.jpg"),
+			)
+		}
+	}
+	if family == "file" {
+		base := filepath.Join(s.cfg.DBRoot, "msg", "file", month)
+		for _, name := range fileNames {
+			if safeLeafName(name) {
+				candidates = append(candidates, filepath.Join(base, name))
+			}
+		}
+	}
+	out := make([]string, 0, len(candidates))
+	seen := map[string]bool{}
+	for _, p := range candidates {
+		if p == "" || seen[p] {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			out = append(out, p)
+			seen[p] = true
+		}
+	}
+	return out
+}
+
+func (s *server) resolveLooseChatArg(a map[string]any) (string, error) {
+	raw := strings.TrimSpace(firstNonEmpty(getStr(a, "talker"), getStr(a, "chat")))
+	if raw == "" || looksLikeRawChatID(raw) {
+		return raw, nil
+	}
+	db, err := s.openCacheIndex(false)
+	if err != nil {
+		return "", fmt.Errorf("chat %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw talker/wxid", raw)
+	}
+	defer db.Close()
+	return resolveTalkerForCache(db, map[string]any{"chat": raw}, true)
+}
+
+func (s *server) resolveLooseSenderArg(a map[string]any) (string, error) {
+	raw := strings.TrimSpace(getStr(a, "sender"))
+	if raw == "" || looksLikeRawChatID(raw) {
+		return raw, nil
+	}
+	db, err := s.openCacheIndex(false)
+	if err != nil {
+		return "", fmt.Errorf("sender %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw sender wxid", raw)
+	}
+	defer db.Close()
+	cands, err := resolveChatCandidates(db, raw, "", 1)
+	if err != nil {
+		return "", err
+	}
+	if len(cands) == 0 {
+		return "", fmt.Errorf("sender %q not found; pass raw sender wxid", raw)
+	}
+	return cands[0].Username, nil
+}
+
+func mediaKindWhere(kind, alias string) (string, []any, error) {
+	col := alias + ".message_local_type"
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "image":
+		return col + " = ?", []any{int64(3)}, nil
+	case "voice":
+		return col + " = ?", []any{int64(34)}, nil
+	case "video":
+		return col + " = ?", []any{int64(43)}, nil
+	case "sticker", "emoji":
+		return col + " = ?", []any{int64(47)}, nil
+	case "app":
+		return "(" + col + " & 4294967295) = ?", []any{int64(49)}, nil
+	case "file":
+		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8), packedLocalType(49, 24)}, nil
+	case "forward_chat":
+		return col + " = ?", []any{packedLocalType(49, 19)}, nil
+	case "miniprogram":
+		return col + " IN (?, ?)", []any{packedLocalType(49, 33), packedLocalType(49, 36)}, nil
+	case "channel_video":
+		return col + " = ?", []any{packedLocalType(49, 51)}, nil
+	case "announcement":
+		return col + " = ?", []any{packedLocalType(49, 87)}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported media_resources kind_name/type %q", kind)
+	}
+}
+
+func packedLocalType(baseKind, subtype int32) int64 {
+	return int64(uint32(baseKind)) | (int64(subtype) << 32)
+}
+
+func resourceDetailWhere(a map[string]any, alias string) (string, []any, error) {
+	var where []string
+	var args []any
+	if raw, ok, err := int64Arg(a, "resource_type_raw"); err != nil {
+		return "", nil, err
+	} else if ok {
+		where = append(where, alias+".type = ?")
+		args = append(args, raw)
+	}
+	if fam := strings.TrimSpace(strings.ToLower(getStr(a, "resource_family"))); fam != "" {
+		var code int64
+		switch fam {
+		case "image":
+			code = 1
+		case "video":
+			code = 2
+		case "file":
+			code = 3
+		case "cover":
+			code = 4
+		case "unknown":
+			code = 0
+		default:
+			return "", nil, fmt.Errorf("unsupported resource_family %q", fam)
+		}
+		if code == 0 {
+			where = append(where, "("+alias+".type & 65535) NOT IN (1, 2, 3, 4)")
+		} else {
+			where = append(where, "("+alias+".type & 65535) = ?")
+			args = append(args, code)
+		}
+	}
+	return strings.Join(where, " AND "), args, nil
+}
+
+func mediaResourceFamily(rawType int64, baseKind int32, kindName string) string {
+	switch rawType & 0xFFFF {
+	case 1:
+		return "image"
+	case 2:
+		return "video"
+	case 3:
+		return "file"
+	case 4:
+		return "cover"
+	}
+	switch {
+	case baseKind == 3:
+		return "image"
+	case baseKind == 43:
+		return "video"
+	case kindName == "file":
+		return "file"
+	}
+	return "unknown"
+}
+
+func rowBytes(r wcdb.Row, key string) []byte {
+	if v, ok := r[key]; ok {
+		switch x := v.(type) {
+		case []byte:
+			return x
+		case string:
+			return []byte(x)
+		}
+	}
+	return nil
+}
+
+var md5LikeRe = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+
+func firstMD5(vals []string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if md5LikeRe.MatchString(v) {
+			return strings.ToLower(v)
+		}
+	}
+	return ""
+}
+
+func fileNameStrings(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" || md5LikeRe.MatchString(v) || !safeLeafName(v) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return uniqueStrings(out)
+}
+
+func safeLeafName(name string) bool {
+	if name == "" || len(name) > 255 {
+		return false
+	}
+	if strings.Contains(name, "\x00") || strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	return filepath.Base(name) == name
+}
+
+func packedStrings(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	var out []string
+	var walk func([]byte, int)
+	walk = func(buf []byte, depth int) {
+		if depth > 4 || len(buf) == 0 {
+			return
+		}
+		for i := 0; i < len(buf); {
+			key, n, ok := readProtoVarint(buf, i)
+			if !ok || key == 0 {
+				return
+			}
+			i += n
+			wire := key & 0x7
+			switch wire {
+			case 0:
+				_, n, ok := readProtoVarint(buf, i)
+				if !ok {
+					return
+				}
+				i += n
+			case 1:
+				if i+8 > len(buf) {
+					return
+				}
+				i += 8
+			case 2:
+				ln, n, ok := readProtoVarint(buf, i)
+				if !ok {
+					return
+				}
+				i += n
+				if ln > uint64(len(buf)-i) {
+					return
+				}
+				field := buf[i : i+int(ln)]
+				i += int(ln)
+				if s, ok := printablePackedString(field); ok {
+					out = append(out, s)
+				}
+				walk(field, depth+1)
+			case 5:
+				if i+4 > len(buf) {
+					return
+				}
+				i += 4
+			default:
+				return
+			}
+		}
+	}
+	walk(data, 0)
+	return uniqueStrings(out)
+}
+
+func readProtoVarint(buf []byte, off int) (uint64, int, bool) {
+	var x uint64
+	var shift uint
+	for i := off; i < len(buf) && i < off+10; i++ {
+		b := buf[i]
+		x |= uint64(b&0x7F) << shift
+		if b < 0x80 {
+			return x, i - off + 1, true
+		}
+		shift += 7
+	}
+	return 0, 0, false
+}
+
+func printablePackedString(buf []byte) (string, bool) {
+	if len(buf) == 0 || len(buf) > 512 || !utf8.Valid(buf) {
+		return "", false
+	}
+	s := strings.TrimSpace(string(buf))
+	if s == "" {
+		return "", false
+	}
+	for _, r := range s {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			return "", false
+		}
+	}
+	return s, true
+}
+
+func uniqueStrings(vals []string) []string {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(vals))
+	seen := map[string]bool{}
+	for _, v := range vals {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func (s *server) toolGroupMembers(a map[string]any) (any, error) {
@@ -2044,6 +2596,51 @@ func getBool(a map[string]any, k string) bool {
 		}
 	}
 	return false
+}
+
+func getBoolDefault(a map[string]any, k string, def bool) bool {
+	if v, ok := a[k]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return def
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func int64Arg(a map[string]any, k string) (int64, bool, error) {
+	v, ok := a[k]
+	if !ok || v == nil {
+		return 0, false, nil
+	}
+	if n, ok := integerArgValue(v); ok {
+		return n, true, nil
+	}
+	if s, ok := v.(string); ok {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return 0, false, fmt.Errorf("invalid argument %q: expected integer string, got %q", k, s)
+		}
+		return n, true, nil
+	}
+	return 0, false, fmt.Errorf("invalid argument %q: expected integer, got %T", k, v)
+}
+
+func mediaServerIDArg(a map[string]any) (int64, bool, error) {
+	for _, key := range []string{"server_id_str", "message_server_id_str", "server_id", "message_server_id"} {
+		if n, ok, err := int64Arg(a, key); ok || err != nil {
+			return n, ok, err
+		}
+	}
+	return 0, false, nil
 }
 
 func validateToolArgs(name string, args map[string]any) error {

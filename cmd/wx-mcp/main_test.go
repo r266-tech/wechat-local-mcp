@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/r266-tech/wx-mcp/internal/config"
 	"github.com/r266-tech/wx-mcp/internal/wcdb"
 )
 
@@ -192,6 +194,19 @@ func TestValidateToolArgsRejectsUnknownAndBadEnums(t *testing.T) {
 	if err := validateToolArgs("resolve_chat", map[string]any{"chat": "张三"}); err != nil {
 		t.Fatalf("validateToolArgs should allow resolve_chat aliases: %v", err)
 	}
+	if err := validateToolArgs("media_resources", map[string]any{"server_id_str": "7710666891970547832"}); err != nil {
+		t.Fatalf("validateToolArgs should allow string server id for media_resources: %v", err)
+	}
+}
+
+func TestParseKVFlagsPreservesStringIDs(t *testing.T) {
+	flags := parseKVFlags([]string{"--server-id-str", "7710666891970547832", "--limit", "1"})
+	if got, ok := flags["server_id_str"].(string); !ok || got != "7710666891970547832" {
+		t.Fatalf("server_id_str = %#v, want string", flags["server_id_str"])
+	}
+	if got, ok := flags["limit"].(int64); !ok || got != 1 {
+		t.Fatalf("limit = %#v, want int64(1)", flags["limit"])
+	}
 }
 
 func TestCacheCursorRoundTrip(t *testing.T) {
@@ -233,6 +248,57 @@ func TestParseSnsXMLMediaMetadata(t *testing.T) {
 	}
 	if m.Width != 720 || m.Height != 1280 || m.TotalSize != 123456 || m.VideoMD5 != "video-md5" || m.VideoDuration != 37 {
 		t.Fatalf("size/video metadata missing: %#v", m)
+	}
+}
+
+func TestPackedStringsExtractsResourceNamesAndMD5(t *testing.T) {
+	fileBlob, err := hex.DecodeString("0A310A1571626974746F7272656E742D352E302E352E646D67121871626974746F7272656E742D352E302E352831292E646D67")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := packedStrings(fileBlob)
+	if len(got) != 2 || got[0] != "qbittorrent-5.0.5.dmg" || got[1] != "qbittorrent-5.0.5(1).dmg" {
+		t.Fatalf("packedStrings(file) = %#v", got)
+	}
+	md5Blob, err := hex.DecodeString("12220A206665383737363333396364363765363032336437653437623937623037336130")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = packedStrings(md5Blob)
+	if len(got) != 1 || got[0] != "fe8776339cd67e6023d7e47b97b073a0" {
+		t.Fatalf("packedStrings(md5) = %#v", got)
+	}
+}
+
+func TestLocalMediaPathsUsesExactWeChatLayout(t *testing.T) {
+	root := t.TempDir()
+	srv := &server{cfg: &config.Config{DBRoot: root}}
+	talker := "wxid_media_test"
+	ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.Local).Unix()
+	md5 := "fe8776339cd67e6023d7e47b97b073a0"
+	img := filepath.Join(root, "msg", "attach", talkerHash(talker), "2026-05", "Img", md5+".dat")
+	if err := os.MkdirAll(filepath.Dir(img), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(img, []byte("img"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths := srv.localMediaPaths(talker, ts, "image", md5, nil)
+	if len(paths) != 1 || paths[0] != img {
+		t.Fatalf("image localMediaPaths = %#v, want %q", paths, img)
+	}
+
+	fileName := "report.pdf"
+	filePath := filepath.Join(root, "msg", "file", "2026-05", fileName)
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths = srv.localMediaPaths(talker, ts, "file", "", []string{fileName, "../bad.pdf"})
+	if len(paths) != 1 || paths[0] != filePath {
+		t.Fatalf("file localMediaPaths = %#v, want %q", paths, filePath)
 	}
 }
 

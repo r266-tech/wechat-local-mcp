@@ -1,6 +1,6 @@
 {
   "name": "wx-mcp",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Agent-first MCP server for local WeChat 4.x data on macOS.",
   "homepage": "https://github.com/r266-tech/wx-mcp",
   "license": "MIT",
@@ -22,7 +22,7 @@
     "keyBootstrap": "./wxkey bootstrap"
   },
   "tools": {
-    "primary": ["sessions", "resolve_chat", "messages", "search", "new_messages"],
+    "primary": ["sessions", "resolve_chat", "messages", "media_resources", "search", "new_messages"],
     "cache": ["cache_status", "cache_refresh", "cache_rebuild", "unread", "stats", "export_messages"],
     "payments": ["transfers", "red_packets"],
     "social": ["sns", "sns_feed", "sns_search", "sns_notifications"],
