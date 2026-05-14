@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"html"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/r266-tech/wx-mcp/internal/config"
@@ -124,6 +126,9 @@ func (s *server) openCacheIndex(writable bool) (*wcdb.DB, error) {
 		return nil, err
 	}
 	if !writable {
+		if err := s.ensureCacheFresh(paths); err != nil {
+			return nil, err
+		}
 		if _, err := os.Stat(paths.IndexPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil, errCacheMissing
@@ -132,6 +137,112 @@ func (s *server) openCacheIndex(writable bool) (*wcdb.DB, error) {
 		}
 	}
 	return wcdb.OpenPlain(paths.IndexPath, writable)
+}
+
+func (s *server) ensureCacheFresh(paths cachePaths) error {
+	if envBool("WX_MCP_DISABLE_AUTO_REFRESH") {
+		return nil
+	}
+	fresh, _, err := s.cacheFreshness(s.cfg, paths)
+	if err != nil {
+		return err
+	}
+	if fresh {
+		return nil
+	}
+	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
+	if err != nil {
+		return err
+	}
+	if acquired {
+		defer unlock()
+		if _, err := s.refreshCache(false); err != nil {
+			return err
+		}
+		fresh, reason, err := s.cacheFreshness(s.cfg, paths)
+		if err != nil {
+			return err
+		}
+		if !fresh {
+			if cacheDriftedAfterRefresh(reason) {
+				fmt.Fprintf(os.Stderr, "[wx-mcp] cache source changed again during refresh (%s); returning latest completed snapshot\n", reason)
+				return nil
+			}
+			return fmt.Errorf("cache refresh completed but cache is still not usable: %s", reason)
+		}
+		return nil
+	}
+
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		fresh, _, err := s.cacheFreshness(s.cfg, paths)
+		if err != nil {
+			return err
+		}
+		if fresh {
+			return nil
+		}
+	}
+	return fmt.Errorf("cache refresh already running and cache is still stale after waiting (lock: %s)", lockPath)
+}
+
+func cacheDriftedAfterRefresh(reason string) bool {
+	return strings.HasPrefix(reason, "changed source db: ")
+}
+
+func (s *server) cacheFreshness(cfg *config.Config, paths cachePaths) (bool, string, error) {
+	if !fileExists(paths.IndexPath) {
+		return false, "cache index missing", nil
+	}
+	sources, err := listSourceDBs(cfg, paths)
+	if err != nil {
+		return false, "", err
+	}
+	prev := loadCacheFileMeta(paths.IndexPath)
+	if len(prev) == 0 {
+		return false, "cache metadata missing", nil
+	}
+	for _, src := range sources {
+		critical := isCriticalCacheSource(src.RelPath)
+		old, ok := prev[src.RelPath]
+		if !ok {
+			if critical {
+				return false, "new source db: " + src.RelPath, nil
+			}
+			continue
+		}
+		if old.DBMTime != src.DBMTime || old.WALMTime != src.WALMTime || old.SaltHex != src.SaltHex {
+			if critical {
+				return false, "changed source db: " + src.RelPath, nil
+			}
+			continue
+		}
+		if old.Status == "ok" && !fileExists(src.Snapshot) {
+			if critical {
+				return false, "snapshot missing: " + src.RelPath, nil
+			}
+			continue
+		}
+		if old.Status == "error" && critical {
+			return false, "critical snapshot error: " + src.RelPath, nil
+		}
+	}
+	return true, "", nil
+}
+
+func isCriticalCacheSource(rel string) bool {
+	switch rel {
+	case "contact/contact.db", "session/session.db", "message/message_resource.db":
+		return true
+	}
+	if strings.HasPrefix(rel, "message/message_") && strings.HasSuffix(rel, ".db") && !strings.HasSuffix(rel, "_fts.db") {
+		return true
+	}
+	if strings.HasPrefix(rel, "message/biz_message_") && strings.HasSuffix(rel, ".db") {
+		return true
+	}
+	return false
 }
 
 func (s *server) toolCacheStatus(a map[string]any) (any, error) {
@@ -190,6 +301,14 @@ func (s *server) toolCacheStatus(a map[string]any) (any, error) {
 		}
 		out["meta"] = meta
 	}
+	if cfg.DBRoot != "" {
+		if fresh, reason, err := s.cacheFreshness(cfg, paths); err == nil {
+			out["fresh"] = fresh
+			if reason != "" {
+				out["stale_reason"] = reason
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -205,8 +324,75 @@ func (s *server) toolCacheRefresh(a map[string]any) (any, error) {
 			"lock":    lockPath,
 		}, nil
 	}
+	if getBool(a, "background") {
+		force := getBool(a, "force")
+		logPath, err := spawnBackgroundCacheRefresh(force, lockPath)
+		if err != nil {
+			unlock()
+			return nil, err
+		}
+		return map[string]any{
+			"started":    true,
+			"background": true,
+			"force":      force,
+			"lock":       lockPath,
+			"log":        logPath,
+		}, nil
+	}
 	defer unlock()
 	return s.refreshCache(getBool(a, "force"))
+}
+
+func spawnBackgroundCacheRefresh(force bool, lockPath string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	logDir := filepath.Join(home, "Library", "Logs", "wx-mcp")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return "", err
+	}
+	logPath := filepath.Join(logDir, "cache-refresh.background.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer logFile.Close()
+
+	args := []string{"cache", "refresh"}
+	if force {
+		args = append(args, "--force")
+	}
+	script := `
+lock="$1"; shift
+log="$1"; shift
+ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+cleanup() {
+  rc=$?
+  echo "$(ts) cache refresh background exit=$rc" >> "$log"
+  rmdir "$lock" 2>/dev/null || rm -rf "$lock"
+}
+trap cleanup EXIT INT TERM
+echo "$(ts) cache refresh background start pid=$$" >> "$log"
+WX_MCP_CACHE_LOCK_HELD=1 "$@"
+exit $?
+`
+	cmd := exec.Command("/bin/sh", append([]string{"-c", script, "wx-mcp-cache-refresh-bg", lockPath, logPath, exe}, args...)...)
+	cmd.Env = os.Environ()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return "", err
+	}
+	return logPath, nil
 }
 
 func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
@@ -229,8 +415,11 @@ func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
 }
 
 func acquireCacheRefreshLock() (func(), bool, string, error) {
-	if os.Getenv("WX_MCP_CACHE_LOCK_HELD") != "" {
-		return func() {}, true, "", nil
+	if held := os.Getenv("WX_MCP_CACHE_LOCK_HELD"); held != "" {
+		if held == "1" {
+			return func() {}, true, "", nil
+		}
+		return func() { _ = os.Remove(held) }, true, held, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -306,7 +495,7 @@ func (s *server) refreshCache(force bool) (any, error) {
 			metas = append(metas, meta)
 			continue
 		}
-		db, err := s.openDBWritable(src.Subdir, src.File)
+		db, err := s.openDBWritable(src.Subdir, src.File, isCriticalCacheSource(src.RelPath))
 		if err != nil {
 			meta.Status = "error"
 			meta.Error = err.Error()
@@ -325,6 +514,9 @@ func (s *server) refreshCache(force bool) (any, error) {
 			continue
 		}
 		db.Close()
+		meta.DBMTime = fileMTimeNanos(src.Source)
+		meta.WALMTime = fileMTimeNanos(src.Source + "-wal")
+		meta.SaltHex = readSaltHex(src.Source)
 		meta.CopiedAt = time.Now().Unix()
 		stats["snapshotted"]++
 		metas = append(metas, meta)
@@ -347,7 +539,7 @@ func (s *server) refreshCache(force bool) (any, error) {
 	}, nil
 }
 
-func (s *server) openDBWritable(subdir, file string) (*wcdb.DB, error) {
+func (s *server) openDBWritable(subdir, file string, allowKeyRefresh bool) (*wcdb.DB, error) {
 	if err := s.ensure(); err != nil {
 		return nil, err
 	}
@@ -359,9 +551,22 @@ func (s *server) openDBWritable(subdir, file string) (*wcdb.DB, error) {
 		return nil, err
 	}
 	if len(s.cfg.Keys) > 0 {
-		return wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys, s.cfg.Key)
+		db, err := wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys)
+		if err == nil || !isMissingEncKeyErr(err) || !allowKeyRefresh {
+			return db, err
+		}
+		if setupErr := s.refreshKeysFromWxkey(err.Error()); setupErr != nil {
+			return nil, setupErr
+		}
+		return wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys)
 	}
-	return wcdb.OpenWritable(resolvedDB, s.cfg.Key)
+	if !allowKeyRefresh {
+		return nil, fmt.Errorf("no schema-2 DB keys cached")
+	}
+	if err := s.refreshKeysFromWxkey("no schema-2 DB keys cached"); err != nil {
+		return nil, err
+	}
+	return wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys)
 }
 
 func listSourceDBs(cfg *config.Config, paths cachePaths) ([]sourceDBInfo, error) {

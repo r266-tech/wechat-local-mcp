@@ -3,14 +3,12 @@
 This repository is meant to be installed and operated by an agent for a user.
 
 > **One-time human-in-the-loop step:** `wxkey bootstrap` (run as part of
-> `install.sh --all`) needs `task_for_pid` permission. wxkey self-elevates via
-> osascript, which shows a macOS desktop password dialog that the human user
-> must respond to once. An agent cannot click through this dialog from a
-> non-interactive shell, and `sudo` will also fail because there is no tty.
-> Tell the user to run `./install.sh --all --yes --json` (or `./wxkey
-> bootstrap` alone) in a local terminal on their Mac, respond to the dialog
-> once, then all subsequent operations (cache refresh, DB decryption, MCP
-> serving) work fully unattended.
+> `install.sh --all`) needs `task_for_pid` permission. The supported path is
+> no-SIP only: ad-hoc sign WeChat when needed, ask the user for their Mac admin
+> password once, verify it with sudo, and store it in the user's macOS Keychain.
+> Agents may run `./install.sh --all --yes --json`; the user only answers the
+> wx-mcp hidden password prompt. Later cache refreshes, DB decryption, and key
+> re-scans use the stored sudo credential unattended.
 
 ## Fast Path
 
@@ -40,8 +38,8 @@ Then call MCP tools, starting with `sessions` or `resolve_chat`.
 ## Required Runtime Facts
 
 - macOS arm64 and WeChat 4.x.
-- Runtime DB reads do not require disabling SIP after `~/.config/wxcli/config.json` has a usable key.
-- First key setup should use `./wxkey bootstrap`. It may quit, ad-hoc resign, and reopen WeChat.
+- Runtime DB reads and key refreshes do not require disabling SIP after `wxkey bootstrap` has stored the sudo credential and written a schema-2 key map.
+- First key setup should use `./wxkey bootstrap`. It may quit, ad-hoc resign, reopen WeChat, and store a wx-mcp sudo credential in Keychain.
 - `libWCDB.dylib` must be present beside `wx-mcp`, in `~/.config/wxcli/lib/`, or via `WX_MCP_WCDB_DYLIB`.
 
 ## TCC Quiet-Mode (recommend to user once)
@@ -53,14 +51,14 @@ After install completes, advise the user once:
 
 Without this, on macOS 15+ each cross-container DB read may trigger a
 "wx-mcp wants to access another app's data" prompt. The installer no
-longer installs a launchd watcher by default for the same reason — call
-`cache_refresh` MCP tool on demand instead of running cache refresh on
-a 5-minute timer.
+longer installs a launchd watcher by default for the same reason. Normal MCP
+reads refresh stale cache before returning data, so do not add a 5-minute timer
+unless the user explicitly wants background CPU cost.
 
 ## Agent Defaults
 
 - Prefer MCP tools over CLI stdout for production agent workflows.
-- Run `cache_refresh` after first setup; use `cache_status` to inspect freshness and errors.
+- Do not manually run `cache_refresh` before normal reads. Cache-backed tools perform a freshness gate and auto-refresh before returning data; use `cache_status` only to inspect freshness and errors. If a human explicitly asks for refresh through MCP, prefer `cache_refresh` with `background=true` to avoid tool-call timeout.
 - Use `resolve_chat` before tools that accept human names.
 - Use `messages` with `fields=lite` unless raw XML or parsed payloads are needed.
 - Use `media_resources` after `messages`/`search` when a result is image/video/file-like and the task needs local attachment paths, resource sizes, or download status. Prefer `server_id_str` for 64-bit server IDs if you are copying IDs through JSON.
@@ -70,7 +68,7 @@ a 5-minute timer.
 
 ## Failure Handling
 
-- If key setup fails, run `./wxkey doctor`.
+- If key setup fails, run `./wxkey doctor`. Do not suggest disabling SIP; the supported recovery path is fixing the no-SIP sudo/Keychain route.
 - If a display-name chat lookup fails, call `resolve_chat` and pass the returned raw `username`.
-- If cache-dependent filters fail, run `wx-mcp cache refresh`.
+- If cache-dependent filters fail, inspect `cache_status`; normal tool calls should already have attempted an automatic refresh.
 - Treat `errors[]`, `parse_error`, missing enrichment fields, and cache `message_errors` as actionable diagnostics, not prose.

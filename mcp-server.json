@@ -18,7 +18,8 @@
     "requires": [
       "WeChat 4.x logged in on macOS",
       "libWCDB.dylib beside wx-mcp or configured with WX_MCP_WCDB_DYLIB",
-      "cached WeChat DB key in ~/.config/wxcli/config.json"
+      "schema-2 WeChat DB key map in ~/.config/wxcli/config.json",
+      "wx-mcp sudo credential stored in the user's macOS Keychain by wxkey bootstrap"
     ],
     "keyBootstrap": "./wxkey bootstrap"
   },

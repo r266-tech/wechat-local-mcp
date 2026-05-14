@@ -256,7 +256,7 @@ MCP mode:
 
 Cache CLI:
   wx-mcp cache status
-  wx-mcp cache refresh [--force]
+  wx-mcp cache refresh [--force] [--background]
   wx-mcp cache rebuild
 
 Query/export CLI:

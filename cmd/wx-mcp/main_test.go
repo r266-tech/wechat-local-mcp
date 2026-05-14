@@ -199,6 +199,44 @@ func TestValidateToolArgsRejectsUnknownAndBadEnums(t *testing.T) {
 	}
 }
 
+func TestConfigReadyRequiresSchema2Keys(t *testing.T) {
+	if (&config.Config{Key: strings.Repeat("a", 64)}).Ready() {
+		t.Fatalf("legacy master key must not be treated as ready")
+	}
+	if !(&config.Config{Keys: map[string]string{"salt": "enc"}}).Ready() {
+		t.Fatalf("schema-2 key map should be ready")
+	}
+}
+
+func TestKeyRefreshReasonKeyUsesMissingSalt(t *testing.T) {
+	got := keyRefreshReasonKey("no enc_key for salt 0123456789abcdef0123456789abcdef in /tmp/message.db - refresh wxkey's schema-2 key map")
+	if got != "salt:0123456789abcdef0123456789abcdef" {
+		t.Fatalf("keyRefreshReasonKey = %q", got)
+	}
+}
+
+func TestCriticalCacheSourceClassification(t *testing.T) {
+	for _, rel := range []string{"contact/contact.db", "session/session.db", "message/message_0.db", "message/biz_message_1.db", "message/message_resource.db"} {
+		if !isCriticalCacheSource(rel) {
+			t.Fatalf("%s should be critical", rel)
+		}
+	}
+	for _, rel := range []string{"message/message_fts.db", "migrate/unspportmsg.db", "favorite/favorite.db"} {
+		if isCriticalCacheSource(rel) {
+			t.Fatalf("%s should not be critical", rel)
+		}
+	}
+}
+
+func TestCacheDriftedAfterRefresh(t *testing.T) {
+	if !cacheDriftedAfterRefresh("changed source db: message/message_0.db") {
+		t.Fatalf("changed source db should be treated as post-refresh drift")
+	}
+	if cacheDriftedAfterRefresh("critical snapshot error: message/message_0.db") {
+		t.Fatalf("critical snapshot errors must not be ignored")
+	}
+}
+
 func TestParseKVFlagsPreservesStringIDs(t *testing.T) {
 	flags := parseKVFlags([]string{"--server-id-str", "7710666891970547832", "--limit", "1"})
 	if got, ok := flags["server_id_str"].(string); !ok || got != "7710666891970547832" {

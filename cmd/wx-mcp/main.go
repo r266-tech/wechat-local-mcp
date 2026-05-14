@@ -73,9 +73,10 @@ type contentBlock struct {
 // ──────────────────── server state ────────────────────
 
 type server struct {
-	cfg      *config.Config
-	wcdbPath string
-	ok       bool
+	cfg            *config.Config
+	wcdbPath       string
+	ok             bool
+	keyRefreshLast map[string]time.Time
 }
 
 // findWCDB locates libWCDB.dylib. Looks in this order:
@@ -132,24 +133,67 @@ func (s *server) ensure() error {
 		_ = config.Save(cfg)
 	}
 	if !cfg.Ready() {
-		fmt.Fprintln(os.Stderr, "[wx-mcp] no DB key cached — running `wxkey setup` (admin prompt may appear)...")
-		res, stderr, err := wxkey.RunSetup()
-		if err != nil {
-			return fmt.Errorf("wxkey setup failed: %w\n%s\nFor first-run no-SIP setup, run `./wxkey bootstrap` in the wx-mcp directory, then restart wx-mcp.", err, stderr)
+		s.cfg = cfg
+		s.wcdbPath = wcdbPath
+		if err := s.refreshKeysFromWxkey("no schema-2 DB keys cached"); err != nil {
+			return err
 		}
-		// wxkey writes the config itself; reload to pick up the new keys map.
-		fresh, err := config.Load()
-		if err != nil {
-			return fmt.Errorf("reload config after wxkey setup: %w", err)
-		}
-		cfg = fresh
-		fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey setup OK — %d per-DB keys cached for wxid=%s\n",
-			len(res.Keys), res.WxID)
+		cfg = s.cfg
 	}
 	s.cfg = cfg
 	s.wcdbPath = wcdbPath
 	s.ok = true
 	return nil
+}
+
+func (s *server) refreshKeysFromWxkey(reason string) error {
+	const retryInterval = 30 * time.Second
+	key := keyRefreshReasonKey(reason)
+	if s.keyRefreshLast == nil {
+		s.keyRefreshLast = map[string]time.Time{}
+	}
+	if last, ok := s.keyRefreshLast[key]; ok && time.Since(last) < retryInterval {
+		return fmt.Errorf("%s; wxkey setup was already attempted recently for this condition", reason)
+	}
+	s.keyRefreshLast[key] = time.Now()
+	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running `wxkey setup` with stored sudo credential...\n", reason)
+	res, stderr, err := wxkey.RunSetup()
+	if err != nil {
+		return fmt.Errorf("wxkey setup failed: %w\n%s\nRun `wxkey bootstrap` once to store the sudo credential and prepare the no-SIP key cache.", err, stderr)
+	}
+	fresh, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("reload config after wxkey setup: %w", err)
+	}
+	if !fresh.Ready() {
+		return fmt.Errorf("wxkey setup completed but config still has no schema-2 enc_key map")
+	}
+	s.cfg = fresh
+	s.ok = true
+	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey setup OK — %d per-DB keys cached for wxid=%s\n",
+		len(res.Keys), res.WxID)
+	return nil
+}
+
+func keyRefreshReasonKey(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "unknown"
+	}
+	if i := strings.Index(reason, "no enc_key for salt "); i >= 0 {
+		rest := reason[i+len("no enc_key for salt "):]
+		fields := strings.Fields(rest)
+		if len(fields) > 0 {
+			return "salt:" + fields[0]
+		}
+	}
+	if strings.Contains(reason, "no schema-2 DB keys cached") {
+		return "empty-schema2-key-map"
+	}
+	if len(reason) > 160 {
+		return reason[:160]
+	}
+	return reason
 }
 
 func (s *server) openDB(subdir, file string) (*wcdb.DB, error) {
@@ -164,12 +208,23 @@ func (s *server) openDB(subdir, file string) (*wcdb.DB, error) {
 		return nil, err
 	}
 	if len(s.cfg.Keys) > 0 {
-		// Prefer schema-2 enc_key per salt; fall back to legacy master password
-		// for DBs whose key didn't land in WeChat's heap during the scan.
-		return wcdb.OpenWithKeyMap(resolvedDB, s.cfg.Keys, s.cfg.Key)
+		db, err := wcdb.OpenWithKeyMap(resolvedDB, s.cfg.Keys)
+		if err == nil || !isMissingEncKeyErr(err) {
+			return db, err
+		}
+		if setupErr := s.refreshKeysFromWxkey(err.Error()); setupErr != nil {
+			return nil, setupErr
+		}
+		return wcdb.OpenWithKeyMap(resolvedDB, s.cfg.Keys)
 	}
-	// Pure schema-1 (legacy) — slow PBKDF2 on every open.
-	return wcdb.Open(resolvedDB, s.cfg.Key)
+	if err := s.refreshKeysFromWxkey("no schema-2 DB keys cached"); err != nil {
+		return nil, err
+	}
+	return wcdb.OpenWithKeyMap(resolvedDB, s.cfg.Keys)
+}
+
+func isMissingEncKeyErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no enc_key for salt")
 }
 
 func (s *server) validatedDBPath(subdir, file string) (string, error) {
@@ -629,9 +684,11 @@ var toolDefs = []toolDef{
 	{
 		Name: "cache_refresh",
 		Description: "刷新明文 DB snapshot cache 并重建统一 index.sqlite. " +
-			"默认按 DB/WAL mtime 复用未变化 snapshot; force=true 强制重解所有可读 DB.",
+			"默认按 DB/WAL mtime 复用未变化 snapshot; force=true 强制重解所有可读 DB. " +
+			"background=true 立即返回并在后台刷新, 避免 MCP 调用超时.",
 		InputSchema: jsonSchema(props{
-			"force": boolProp("强制重建所有 plaintext snapshots"),
+			"force":      boolProp("强制重建所有 plaintext snapshots"),
+			"background": boolProp("后台刷新并立即返回"),
 		}, nil),
 	},
 	{
@@ -2595,6 +2652,11 @@ func getBool(a map[string]any, k string) bool {
 		}
 	}
 	return false
+}
+
+func envBool(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 func getBoolDefault(a map[string]any, k string, def bool) bool {

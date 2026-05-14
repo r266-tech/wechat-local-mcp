@@ -21,20 +21,20 @@ func main() {
 		fail("config.Load: %v", err)
 	}
 	pretty, _ := json.MarshalIndent(struct {
-		Schema int    `json:"schema_version"`
-		WxID   string `json:"wxid"`
-		Root   string `json:"db_root"`
-		Keys   int    `json:"keys_count"`
-		Legacy bool   `json:"legacy_master_password_present"`
+		Schema       int    `json:"schema_version"`
+		WxID         string `json:"wxid"`
+		Root         string `json:"db_root"`
+		Keys         int    `json:"keys_count"`
+		IgnoredV1Key bool   `json:"ignored_schema1_key_present"`
 	}{cfg.SchemaVersion, cfg.Wxid, cfg.DBRoot, len(cfg.Keys), cfg.Key != ""}, "", "  ")
 	fmt.Println("config snapshot:")
 	fmt.Println(string(pretty))
 
 	if !cfg.Ready() {
-		fail("config not ready (no keys map and no legacy key)")
+		fail("config not ready: schema-2 keys map is empty")
 	}
 	if len(cfg.Keys) == 0 {
-		fail("schema-2 keys map is empty — schema-1 fallback would still work but isn't what we're testing")
+		fail("schema-2 keys map is empty")
 	}
 
 	// libWCDB.dylib path: same resolution as wx-mcp main.go (repo-bundled lib/).
@@ -94,7 +94,7 @@ func main() {
 		r.Salt = fmt.Sprintf("%x", salt)
 		_, r.HasKey = cfg.Keys[r.Salt]
 
-		db, err := wcdb.OpenWithKeyMap(p, cfg.Keys, cfg.Key)
+		db, err := wcdb.OpenWithKeyMap(p, cfg.Keys)
 		if err != nil {
 			r.Err = err.Error()
 			r.Elapsed = time.Since(start)

@@ -59,9 +59,9 @@ type ResultEntry struct {
 }
 
 // RunSetup invokes `wxkey setup` and parses its JSON output. The CLI handles
-// admin elevation via osascript on its own — we just shell out and read JSON.
-// It intentionally does not run `wxkey bootstrap`, because bootstrap may quit,
-// ad-hoc re-sign, and reopen WeChat.
+// admin elevation by reusing the wx-mcp Keychain sudo credential; wx-mcp just
+// shells out and reads JSON. It intentionally does not run `wxkey bootstrap`,
+// because bootstrap may quit, ad-hoc re-sign, and reopen WeChat.
 // stderrText is also returned so wx-mcp can surface progress / errors.
 func RunSetup() (*SetupResult, string, error) {
 	bin, err := FindBinary()
@@ -75,10 +75,9 @@ func RunSetup() (*SetupResult, string, error) {
 	if runErr != nil {
 		return nil, stderr.String(), fmt.Errorf("wxkey setup failed: %w (stderr: %s)", runErr, stderr.String())
 	}
-	// reExecElevated wraps wxkey in `osascript admin ... 2>&1`, which merges
-	// child stderr into stdout. Anything wxkey writes to stderr (partial-key
-	// warnings, sudo prompts, dyld messages) lands ahead of the JSON. Strip
-	// everything before the first '{' so the JSON object parses cleanly.
+	// Elevated wxkey children can still write progress or sudo diagnostics ahead
+	// of the JSON. Strip everything before the first '{' so the JSON object
+	// parses cleanly.
 	payload := stdout
 	if i := bytes.IndexByte(payload, '{'); i > 0 {
 		payload = payload[i:]

@@ -107,33 +107,6 @@ type DB struct {
 	path   string
 }
 
-// Open opens a WCDB-encrypted SQLite file with the legacy "master password"
-// path: hexKey is the 64-hex 32-byte master password fetched from the WeChat
-// process during the v1 setup flow. SQLCipher runs PBKDF2-HMAC-SHA512 (256000
-// rounds) on every open to derive the per-DB enc_key — slow but compatible
-// with old configs that lack a per-salt key map.
-func Open(dbPath string, hexKey string) (*DB, error) {
-	keyBytes, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid hex key: %w", err)
-	}
-	if len(keyBytes) == 0 {
-		return nil, fmt.Errorf("empty key")
-	}
-	return openWithKeyBlob(dbPath, keyBytes, SQLITE_OPEN_READONLY)
-}
-
-func OpenWritable(dbPath string, hexKey string) (*DB, error) {
-	keyBytes, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid hex key: %w", err)
-	}
-	if len(keyBytes) == 0 {
-		return nil, fmt.Errorf("empty key")
-	}
-	return openWithKeyBlob(dbPath, keyBytes, SQLITE_OPEN_READWRITE)
-}
-
 // OpenWithEncKey opens a WCDB-encrypted SQLite file using the raw-key path:
 // encKeyHex is the 64-hex post-PBKDF2 enc_key (as harvested by `wxkey scan`)
 // and saltHex is the 32-hex SQLCipher salt taken from the file's first 16
@@ -163,14 +136,9 @@ func OpenWithEncKeyWritable(dbPath, encKeyHex, saltHex string) (*DB, error) {
 
 // OpenWithKeyMap opens dbPath after reading the SQLCipher salt from the file
 // header (first 16 bytes) and looking up the matching enc_key in keys
-// (salt-hex → enc_key-hex). If the salt isn't in the map and fallbackHexKey
-// is non-empty, falls back to the schema-1 master-password path (slow:
-// triggers WCDB's internal 256000-round PBKDF2 on each open). This handles
-// message-shard DBs whose enc_keys never landed in WeChat's heap because
-// WeChat hasn't touched that shard this session.
-//
-// fallbackHexKey may be the empty string to disable the fallback.
-func OpenWithKeyMap(dbPath string, keys map[string]string, fallbackHexKey string) (*DB, error) {
+// (salt-hex -> enc_key-hex). wx-mcp intentionally supports only this schema-2
+// raw-key path; missing salts must be fixed by refreshing wxkey's key map.
+func OpenWithKeyMap(dbPath string, keys map[string]string) (*DB, error) {
 	salt, err := readDBSalt(dbPath)
 	if err != nil {
 		return nil, err
@@ -179,13 +147,10 @@ func OpenWithKeyMap(dbPath string, keys map[string]string, fallbackHexKey string
 	if encKeyHex, ok := keys[saltHex]; ok {
 		return OpenWithEncKey(dbPath, encKeyHex, saltHex)
 	}
-	if fallbackHexKey == "" {
-		return nil, fmt.Errorf("no enc_key for salt %s in %s and no fallback master password — re-run `wxkey setup` after touching this DB in WeChat", saltHex, dbPath)
-	}
-	return Open(dbPath, fallbackHexKey)
+	return nil, fmt.Errorf("no enc_key for salt %s in %s — refresh wxkey's schema-2 key map after WeChat touches this DB", saltHex, dbPath)
 }
 
-func OpenWithKeyMapWritable(dbPath string, keys map[string]string, fallbackHexKey string) (*DB, error) {
+func OpenWithKeyMapWritable(dbPath string, keys map[string]string) (*DB, error) {
 	salt, err := readDBSalt(dbPath)
 	if err != nil {
 		return nil, err
@@ -194,10 +159,7 @@ func OpenWithKeyMapWritable(dbPath string, keys map[string]string, fallbackHexKe
 	if encKeyHex, ok := keys[saltHex]; ok {
 		return OpenWithEncKeyWritable(dbPath, encKeyHex, saltHex)
 	}
-	if fallbackHexKey == "" {
-		return nil, fmt.Errorf("no enc_key for salt %s in %s and no fallback master password — re-run `wxkey setup` after touching this DB in WeChat", saltHex, dbPath)
-	}
-	return OpenWritable(dbPath, fallbackHexKey)
+	return nil, fmt.Errorf("no enc_key for salt %s in %s — refresh wxkey's schema-2 key map after WeChat touches this DB", saltHex, dbPath)
 }
 
 // OpenPlain opens an unencrypted SQLite database with the bundled WCDB SQLite

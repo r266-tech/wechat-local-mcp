@@ -16,29 +16,28 @@ import (
 // wcdb.Open formats that pair as the SQL literal `x'<key><salt>'` to skip
 // the 256000-round key derivation on every open.
 //
-// Schema 1 (legacy v1 setup) carries the 32-byte master password in Key.
-// Still honored on read so an old config keeps working until the user
-// re-runs setup.
+// Schema 1 (legacy v1 setup) carried the 32-byte master password in Key.
+// It is intentionally no longer a Ready state: wx-mcp uses one runtime
+// decryption path, the schema-2 per-DB enc_key map produced by wxkey's no-SIP
+// sudo flow. Old configs are forced through wxkey setup once so future refreshes
+// do not depend on the slow legacy master-password path.
 type Config struct {
 	SchemaVersion int               `json:"schema_version,omitempty"`
 	Wxid          string            `json:"wxid"`
 	DBRoot        string            `json:"db_root"`
 	Keys          map[string]string `json:"keys,omitempty"` // salt-hex → enc_key-hex (schema 2)
-	Key           string            `json:"key,omitempty"`  // master password (schema 1, legacy)
+	Key           string            `json:"key,omitempty"`  // ignored legacy master password (schema 1)
 	KeyPID        int               `json:"key_pid,omitempty"`
 	KeyEpoch      int64             `json:"key_epoch,omitempty"`
 }
 
-// Ready reports whether the config has enough material to open WCDB files —
-// either a populated schema-2 keys map or a legacy master password.
+// Ready reports whether the config has enough material to open WCDB files via
+// wx-mcp's only supported runtime path: schema-2 per-salt enc_keys.
 func (c *Config) Ready() bool {
 	if c == nil {
 		return false
 	}
-	if len(c.Keys) > 0 {
-		return true
-	}
-	return c.Key != ""
+	return len(c.Keys) > 0
 }
 
 func dir() (string, error) {

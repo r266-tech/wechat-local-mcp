@@ -7,8 +7,8 @@ agent 友好: 主路径字段语义清晰, 高频 raw int 已配套 resolved 字
 ## 运行前提
 
 - macOS arm64
-- **运行时解密不要求关闭 SIP** — wx-mcp 读库时只加载 `libWCDB.dylib` 并用 `sqlite3_key_v2` 打开加密 DB; 只要 `~/.config/wxcli/config.json` 已有可用 key, SIP 开着也能跑.
-- **首次取 key 推荐 `./wxkey bootstrap`, 不要求关闭 SIP** — bootstrap 会检查 WeChat 签名, 必要时退出 WeChat 并 ad-hoc 重签, 再用 `task_for_pid + mach_vm_read` 扫微信进程内存拿 WCDB key. 关闭 SIP 只是 fallback, 不是主路径.
+- **运行时解密不要求关闭 SIP** — wx-mcp 读库时只加载 `libWCDB.dylib` 并用 `sqlite3_key_v2` 打开加密 DB; 只要 `~/.config/wxcli/config.json` 已有 schema-2 per-DB key map, SIP 开着也能跑.
+- **只保留一种取 key 路径: `./wxkey bootstrap`, 不关闭 SIP** — bootstrap 会检查 WeChat 签名, 必要时退出 WeChat 并 ad-hoc 重签, 让用户输入一次 Mac admin 密码并存入 macOS Keychain, 再用 `sudo -S + task_for_pid + mach_vm_read` 扫微信进程内存拿 WCDB key. 后续缺 key / key 过期时自动复用 Keychain 里的 sudo 密码刷新.
 - 微信 4.x 开着且登录过, 至少打开过一个会话 (让 DB 加载进内存, key 才会出现在 heap 里)
 - key 拿到后写 `~/.config/wxcli/config.json`, 之后微信可关
 - `libWCDB.dylib` 不进源码仓库; release zip 或本机 `WX_MCP_WCDB_DYLIB` / `~/.config/wxcli/lib/libWCDB.dylib` 提供它.
@@ -23,10 +23,7 @@ Agent-first 入口:
 
 这个入口面向"把 GitHub 链接或 zip 丢给 agent"的场景: 安装/构建 binary, 复制 `libWCDB.dylib`, 注册 Claude MCP, 跑 `wxkey bootstrap`, 刷新 cache, 并按需安装 launchd watcher. 所有结果都以 JSON 输出, 失败时看 `errors[]` 和 `log`.
 
-> **首次取 key 必须有桌面用户在场.** `wxkey bootstrap` 用 `task_for_pid` 读微信进程内存, macOS 要求 admin 权限. wxkey 会自动通过 osascript 弹 macOS 系统密码框让你输密码, **不需要 sudo**. 但这意味着:
-> - 不要 `sudo ./install.sh` 或 `sudo wxkey bootstrap` — sudo 在非交互 shell (AI agent / pipe) 里读不到密码会失败.
-> - 不要把这一步喂给 AI agent 的非交互 bash 或 SSH 远程会话 — 没桌面 GUI session, 密码框弹不出来.
-> - 正确做法: 在 Mac 本地终端直接 `./install.sh --all --yes --json` (或单独 `./wxkey bootstrap`), 看到 macOS 密码框时输密码. 之后所有运行 (cache refresh / wx-mcp 启动 / DB 解密) 都不再需要密码, 可全自动化.
+> **首次安装只需要用户输一次 Mac admin 密码.** Agent 可以直接跑 `./install.sh --all --yes --json`; `wxkey bootstrap` 会弹出 wx-mcp 的隐藏密码输入框, 验证 sudo 后把密码存入用户 macOS Keychain. 之后所有运行 (cache refresh / wx-mcp 启动 / DB 解密 / 缺 key 自动补扫) 都复用这份 Keychain 凭据, 不要求用户进终端输入命令, 也不要求关闭 SIP.
 
 > **避免 TCC 反复弹 "wx-mcp 想访问其他 App 的数据" (macOS 15+).** 装完后, 进**系统设置 → 隐私与安全性 → 完全磁盘访问权限**, 点 `+` 把 `~/.local/share/wx-mcp/wx-mcp` 和 `~/.local/share/wx-mcp/wxkey` 加进去. 加完之后所有访问微信容器的请求都默默通过, 不再弹窗. (`--all` 默认**不**装 launchd watcher; 如果你确实需要后台 5 分钟一次自动刷新 cache, 加 `--watcher` 显式开, 但前提是先给上面两个 binary 加 Full Disk Access, 否则 watcher 每次跑都会触发弹窗.)
 
@@ -38,7 +35,7 @@ cd wx-mcp
 WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./install.sh --all --yes --json
 ```
 
-release zip 场景会直接复制包内 `wx-mcp` / `wxkey` / `libWCDB.dylib`. 源码 clone 场景会优先 `go build`; 如果本地没有 wxkey 源码或二进制, installer 会用 Go 从 `github.com/r266-tech/wxkey/cmd/wxkey@v1.4.3` 安装 companion CLI.
+release zip 场景会直接复制包内 `wx-mcp` / `wxkey` / `libWCDB.dylib`. 源码 clone 场景会优先 `go build`; 如果本地没有 wxkey 源码或二进制, installer 会用 Go 从 `github.com/r266-tech/wxkey/cmd/wxkey@latest` 安装 companion CLI.
 
 已有 git checkout 的更新入口:
 
@@ -66,7 +63,7 @@ claude mcp add --scope user wx-mcp "$PWD/wx-mcp"
 
 ## 验证 (推荐首次装完跑一次)
 
-装完不要直接调 LLM, 先在终端跑:
+装完后 agent 会在 `install.sh --all` 里跑 `wxkey bootstrap`. 如需单独复验:
 
 ```bash
 ./wxkey bootstrap
@@ -105,7 +102,7 @@ WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.4.5
 2. agent 再跑 `./install.sh --all --yes --json`.
 3. 让 Claude 调 sessions 拉数据, 通了即可.
 
-前提: 如果目标机器没有现成 key, 首次 key scan 需要微信 4.x 登录态 + 至少开过一个会话. 推荐 no-SIP 路径是 `./wxkey bootstrap`; 如果已预先写好 `~/.config/wxcli/config.json`, wx-mcp 运行时解密不要求关闭 SIP.
+前提: 如果目标机器没有现成 key, 首次 key scan 需要微信 4.x 登录态 + 至少开过一个会话. 支持路径只有 no-SIP `./wxkey bootstrap`: 用户输一次 Mac admin 密码, 后续自动复用 Keychain 凭据.
 
 ## Cache-first 快速路径
 
@@ -124,8 +121,8 @@ raw/          # 每个源 DB 的明文 snapshot
 index.sqlite  # contacts_unified / sessions_unified / messages_unified / message_fts
 ```
 
-`sessions` / `messages` 会优先查 `index.sqlite`; cache 不存在时回退到 WCDB 直读.
-`search` 默认 `search_mode=fts` 依赖 cache index; 只有显式 `search_mode=like` 时才走旧的直读 LIKE fallback.
+`sessions` / `messages` / `search` / `unread` / `new_messages` / `stats` / `export_messages` 在读 `index.sqlite` 前会先比对源 DB/WAL mtime 和 salt. cache 不存在或已落后时, wx-mcp 会先自动 `cache refresh`; 刷新成功后才返回结果, 不返回旧 cache.
+`search` 默认 `search_mode=fts` 依赖 cache index; cache 旧时会先自动刷新. 只有显式 `search_mode=like` 且禁用了自动 refresh 时才可能走旧的直读 LIKE fallback.
 `unread` / `new_messages` / `stats` / `export_messages` 依赖 cache index.
 
 可选 watcher:
@@ -136,7 +133,7 @@ index.sqlite  # contacts_unified / sessions_unified / messages_unified / message
 ./install.sh --all --yes --json
 ```
 
-watcher 是 launchd user agent (`com.r266.wx-mcp-cache-watcher`), 默认每 300 秒跑一次 `wx-mcp cache refresh`, 并用 `~/.wx-mcp/cache-refresh.lock` 防重入. 日志在 `~/Library/Logs/wx-mcp/`.
+watcher 是 launchd user agent (`com.r266.wx-mcp-cache-watcher`), 默认每 300 秒跑一次 `wx-mcp cache refresh`, 并用 `~/.wx-mcp/cache-refresh.lock` 防重入. 日志在 `~/Library/Logs/wx-mcp/`. 日常不需要 watcher: MCP 工具读 cache 前会自动 freshness gate.
 
 ## Agent CLI
 
@@ -185,7 +182,7 @@ CLI 和 MCP 走同一套 cache-first 查询逻辑.
 | `forward_history` | **最近转发目标列表** (用于快捷转发, 非"被转发的消息历史"). 字段: username / display_name / forward_time |
 | `schema` | WCDB 数据库结构. 不传参列所有 db 子目录 + 表名; 传 subdir+file 返回每张表 DDL |
 | `cache_status` | 查看明文 snapshot cache 与统一 index.sqlite 状态. 不触发 wxkey setup |
-| `cache_refresh` | 刷新 snapshot cache 并重建 index.sqlite. 默认按 DB/WAL mtime 复用未变化 snapshot; force=true 强制重解 |
+| `cache_refresh` | 刷新 snapshot cache 并重建 index.sqlite. 默认按 DB/WAL mtime 复用未变化 snapshot; force=true 强制重解; background=true 立即返回并在后台刷新 |
 | `cache_rebuild` | 删除当前 cache 后完整重建 |
 | `unread` | 未读会话列表, 字段同 sessions. 支持 filter/type_filter=private,group 等 |
 | `new_messages` | 增量拉新消息. 支持 chat/talker/after/cursor, 返回 messages + next_cursor. cursor 是 `v2:create_time:base64url_talker:local_id`, 不依赖 cache rebuild 后会漂移的 SQLite rowid |
@@ -239,7 +236,7 @@ wx-mcp/
 运行时 `dlopen` 旁边的 `libWCDB.dylib` (分发包自带).
 
 推荐首次 key 获取: 用户先跑 `./wxkey bootstrap` →
-必要时退出 WeChat 并 ad-hoc 重签 → osascript 弹 admin 提权 → task_for_pid + mach_vm_read 扫微信 heap →
+必要时退出 WeChat 并 ad-hoc 重签 → 用户输一次 Mac admin 密码并存入 Keychain → sudo -S + task_for_pid + mach_vm_read 扫微信 heap →
 SQLCipher 4 page-1 HMAC 验证 → 64 位 hex AES key → 存 `~/.config/wxcli/config.json`.
 
 wx-mcp 检测到 config 缺 key 时仍会尝试自动 spawn 同目录的 `wxkey setup`, 但不会自动重签/重启 WeChat; 这类桌面副作用留给显式的 `./wxkey bootstrap`.
