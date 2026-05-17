@@ -4,18 +4,29 @@ This repository is meant to be installed and operated by an agent for a user.
 
 > **One-time human-in-the-loop step:** `wxkey bootstrap` (run as part of
 > `install.sh --all`) needs `task_for_pid` permission. The supported path is
-> no-SIP only: ad-hoc sign WeChat when needed, ask the user for their Mac admin
-> password once, verify it with sudo, and store it in the user's macOS Keychain.
+> no-SIP only: prepare an ad-hoc signed wx-mcp shadow copy of WeChat when
+> needed, ask the user for their Mac admin password once, verify it with sudo,
+> and store it in the user's macOS Keychain.
 > Agents may run `./install.sh --all --yes --json`; the user only answers the
 > wx-mcp hidden password prompt. Later cache refreshes, DB decryption, and key
 > re-scans use the stored sudo credential unattended.
 
 ## Fast Path
 
+If the user gives you the GitHub repository URL, prefer the latest release zip
+over a source clone. The release zip is the complete install unit: `wx-mcp`,
+`wxkey`, `libWCDB.dylib`, `install.sh`, docs, and manifest.
+Use the stable release asset name `wx-mcp-latest-darwin-arm64.zip` when it is
+present; otherwise pick the newest versioned `wx-mcp-v*-darwin-arm64.zip`.
+
 ```bash
 ./install.sh --dry-run --all --json
 ./install.sh --all --yes --json
 ```
+
+Treat `status=ready` and `status=warming_cache` as successful install states.
+`warming_cache` means cache preheating is running in the background; cache-backed
+tools still freshness-check before returning data.
 
 ## Update Path
 
@@ -39,7 +50,7 @@ Then call MCP tools, starting with `sessions` or `resolve_chat`.
 
 - macOS arm64 and WeChat 4.x.
 - Runtime DB reads and key refreshes do not require disabling SIP after `wxkey bootstrap` has stored the sudo credential and written a schema-2 key map.
-- First key setup should use `./wxkey bootstrap`. It may quit, ad-hoc resign, reopen WeChat, and store a wx-mcp sudo credential in Keychain.
+- First key setup should use `./wxkey bootstrap`. It may quit/reopen WeChat, sign a wx-mcp shadow copy, and store a wx-mcp sudo credential in Keychain.
 - `libWCDB.dylib` must be present beside `wx-mcp`, in `~/.config/wxcli/lib/`, or via `WX_MCP_WCDB_DYLIB`.
 
 ## TCC Quiet-Mode (recommend to user once)
@@ -68,7 +79,7 @@ unless the user explicitly wants background CPU cost.
 
 ## Failure Handling
 
-- If key setup fails, run `./wxkey doctor`. Do not suggest disabling SIP; the supported recovery path is fixing the no-SIP sudo/Keychain route.
+- If key setup fails, inspect installer `blocked_by` / `next_action`, then run `./wxkey doctor` if needed. Do not suggest disabling SIP; the supported recovery path is fixing the no-SIP sudo/Keychain route.
 - If a display-name chat lookup fails, call `resolve_chat` and pass the returned raw `username`.
 - If cache-dependent filters fail, inspect `cache_status`; normal tool calls should already have attempted an automatic refresh.
 - Treat `errors[]`, `parse_error`, missing enrichment fields, and cache `message_errors` as actionable diagnostics, not prose.

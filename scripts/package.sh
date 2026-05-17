@@ -52,8 +52,11 @@ echo "→ zipping..."
 cd dist
 zip -qr "wx-mcp-v${VERSION}-darwin-arm64.zip" "wx-mcp-v${VERSION}-darwin-arm64"
 shasum -a 256 "wx-mcp-v${VERSION}-darwin-arm64.zip" > "wx-mcp-v${VERSION}-darwin-arm64.zip.sha256"
+cp "wx-mcp-v${VERSION}-darwin-arm64.zip" "wx-mcp-latest-darwin-arm64.zip"
+shasum -a 256 "wx-mcp-latest-darwin-arm64.zip" > "wx-mcp-latest-darwin-arm64.zip.sha256"
 
 echo
 echo "✓ dist/wx-mcp-v${VERSION}-darwin-arm64.zip"
 ls -lh "wx-mcp-v${VERSION}-darwin-arm64.zip"
 echo "✓ dist/wx-mcp-v${VERSION}-darwin-arm64.zip.sha256"
+echo "✓ dist/wx-mcp-latest-darwin-arm64.zip"

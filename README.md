@@ -4,11 +4,24 @@
 
 agent 友好: 主路径字段语义清晰, 高频 raw int 已配套 resolved 字段, 命名一致, 无内部噪音.
 
+## Agent-first 安装合同
+
+如果用户只把 GitHub 仓库链接丢给 agent, agent 应该优先下载最新 release zip, 不要优先 clone 源码构建. release zip 是完整安装载体, 必须包含 `wx-mcp` / `wxkey` / `libWCDB.dylib` / `install.sh` / `AGENTS.md` / `mcp-server.json`.
+Release 资产会同时发布版本名和稳定名: `wx-mcp-vX.Y.Z-darwin-arm64.zip` 与 `wx-mcp-latest-darwin-arm64.zip`.
+
+主入口只有一个:
+
+```bash
+./install.sh --all --yes --json
+```
+
+预期交互: 用户最多输入一次 Mac admin 密码到 wx-mcp hidden prompt, 并确保 WeChat 已登录且至少打开过一个聊天. 之后 installer 自动安装、注册 Claude/Codex MCP、初始化 key、后台预热 cache, 不要求用户手工 codesign、chown、复制 DB、修改 config、关闭 SIP 或手动刷新 cache.
+
 ## 运行前提
 
 - macOS arm64
 - **运行时解密不要求关闭 SIP** — wx-mcp 读库时只加载 `libWCDB.dylib` 并用 `sqlite3_key_v2` 打开加密 DB; 只要 `~/.config/wxcli/config.json` 已有 schema-2 per-DB key map, SIP 开着也能跑.
-- **只保留一种取 key 路径: `./wxkey bootstrap`, 不关闭 SIP** — bootstrap 会检查 WeChat 签名, 必要时退出 WeChat 并 ad-hoc 重签, 让用户输入一次 Mac admin 密码并存入 macOS Keychain, 再用 `sudo -S + task_for_pid + mach_vm_read` 扫微信进程内存拿 WCDB key. 后续缺 key / key 过期时自动复用 Keychain 里的 sudo 密码刷新.
+- **只保留一种取 key 路径: `./wxkey bootstrap`, 不关闭 SIP** — bootstrap 会检查 WeChat 签名, 必要时退出 WeChat 并为 wx-mcp 创建 ad-hoc signed shadow WeChat 副本, 让用户输入一次 Mac admin 密码并存入 macOS Keychain, 再用 `sudo -S + task_for_pid + mach_vm_read` 扫微信进程内存拿 WCDB key. 后续缺 key / key 过期时自动复用 Keychain 里的 sudo 密码刷新.
 - 微信 4.x 开着且登录过, 至少打开过一个会话 (让 DB 加载进内存, key 才会出现在 heap 里)
 - key 拿到后写 `~/.config/wxcli/config.json`, 之后微信可关
 - `libWCDB.dylib` 不进源码仓库; release zip 或本机 `WX_MCP_WCDB_DYLIB` / `~/.config/wxcli/lib/libWCDB.dylib` 提供它.
@@ -21,13 +34,13 @@ Agent-first 入口:
 ./install.sh --all --yes --json
 ```
 
-这个入口面向"把 GitHub 链接或 zip 丢给 agent"的场景: 安装/构建 binary, 复制 `libWCDB.dylib`, 注册 Claude MCP, 跑 `wxkey bootstrap`, 刷新 cache, 并按需安装 launchd watcher. 所有结果都以 JSON 输出, 失败时看 `errors[]` 和 `log`.
+这个入口面向"把 GitHub 链接或 zip 丢给 agent"的场景: 安装/构建 binary, 复制 `libWCDB.dylib`, 注册 Claude/Codex MCP, 跑 `wxkey bootstrap`, 后台预热 cache, 并按需安装 launchd watcher. 所有结果都以 JSON 输出; agent 主要看 `status` / `blocked_by` / `next_action` / `errors[]` / `log`.
 
 > **首次安装只需要用户输一次 Mac admin 密码.** Agent 可以直接跑 `./install.sh --all --yes --json`; `wxkey bootstrap` 会弹出 wx-mcp 的隐藏密码输入框, 验证 sudo 后把密码存入用户 macOS Keychain. 之后所有运行 (cache refresh / wx-mcp 启动 / DB 解密 / 缺 key 自动补扫) 都复用这份 Keychain 凭据, 不要求用户进终端输入命令, 也不要求关闭 SIP.
 
 > **避免 TCC 反复弹 "wx-mcp 想访问其他 App 的数据" (macOS 15+).** 装完后, 进**系统设置 → 隐私与安全性 → 完全磁盘访问权限**, 点 `+` 把 `~/.local/share/wx-mcp/wx-mcp` 和 `~/.local/share/wx-mcp/wxkey` 加进去. 加完之后所有访问微信容器的请求都默默通过, 不再弹窗. (`--all` 默认**不**装 launchd watcher; 如果你确实需要后台 5 分钟一次自动刷新 cache, 加 `--watcher` 显式开, 但前提是先给上面两个 binary 加 Full Disk Access, 否则 watcher 每次跑都会触发弹窗.)
 
-源码 clone 场景:
+源码 clone 场景只适合开发者或没有 release zip 的应急安装; 普通 agent 安装应优先 release zip, 因为源码仓库不包含 `libWCDB.dylib`.
 
 ```bash
 git clone https://github.com/r266-tech/wx-mcp.git
@@ -69,7 +82,7 @@ claude mcp add --scope user wx-mcp "$PWD/wx-mcp"
 ./wxkey bootstrap
 ```
 
-bootstrap 会检查已有 config, 在需要时重签 WeChat 并完成首次 key 初始化. 排障时再跑:
+bootstrap 会检查已有 config, 在需要时创建并签名 wx-mcp shadow WeChat 副本完成首次 key 初始化. 排障时再跑:
 
 ```bash
 ./wxkey doctor
@@ -78,7 +91,7 @@ bootstrap 会检查已有 config, 在需要时重签 WeChat 并完成首次 key 
 doctor 会输出: SIP 状态 / WeChat 签名 / 微信进程 / 账号目录 / DB 数 / dylib / 内存 scan 是否通 / 拿到几个 key.
 没有缓存 key 时, 微信没登录 / 签名未处理 / scan 失败会用中文报错指方向, 比 MCP 启动失败再排查省事.
 
-之后让 Claude 调任意 wx-mcp 工具 (如 sessions) 验证 E2E. 拿不到 key 时模型会照实告诉你错误.
+之后让 Claude/Codex 调任意 wx-mcp 工具 (如 sessions) 验证 E2E. 拿不到 key 时模型会照实告诉你错误.
 
 ## 开发 / 更新
 
@@ -93,14 +106,15 @@ go test ./...
 ## 打分发包 (给朋友)
 
 ```bash
-WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.4.5
-# 产出 dist/wx-mcp-v1.4.5-darwin-arm64.zip + .sha256 (含 wx-mcp + wxkey + libWCDB.dylib + install.sh + docs)
+WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.4.8
+# 产出 dist/wx-mcp-v1.4.8-darwin-arm64.zip + .sha256 (含 wx-mcp + wxkey + libWCDB.dylib + install.sh + docs)
 ```
 
 朋友解压后:
 1. agent 先跑 `./install.sh --dry-run --all --json` 看计划.
 2. agent 再跑 `./install.sh --all --yes --json`.
-3. 让 Claude 调 sessions 拉数据, 通了即可.
+3. JSON 返回 `status=ready` 或 `status=warming_cache` 都表示安装主流程完成; `warming_cache` 表示 cache 正在后台预热.
+4. 让 Claude/Codex 调 `sessions` 拉数据, 通了即可.
 
 前提: 如果目标机器没有现成 key, 首次 key scan 需要微信 4.x 登录态 + 至少开过一个会话. 支持路径只有 no-SIP `./wxkey bootstrap`: 用户输一次 Mac admin 密码, 后续自动复用 Keychain 凭据.
 

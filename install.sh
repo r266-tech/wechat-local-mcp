@@ -33,11 +33,15 @@ MCP_REGISTERED=0
 WATCHER_INSTALLED=0
 BOOTSTRAP_RAN=0
 REFRESH_RAN=0
+INSTALL_STATUS="ok"
+BLOCKED_BY=""
+NEXT_ACTION=""
 
 typeset -a ACTIONS
 typeset -a WARNINGS
 typeset -a ERRORS
 typeset -a CHECKS
+typeset -a MCP_REGISTERED_CLIENTS
 
 usage() {
   cat <<'EOF'
@@ -58,14 +62,16 @@ Install options:
                             Does not bootstrap, refresh cache, register MCP,
                             or touch watcher unless those flags are added.
   --bootstrap               Run wxkey bootstrap after installing binaries.
-  --refresh                 Run wx-mcp cache refresh after installing binaries.
+  --refresh                 Start wx-mcp cache refresh after installing binaries.
+                            Defaults to background warmup; set
+                            WX_MCP_INSTALL_SYNC_REFRESH=1 for foreground wait.
   --watcher                 Install launchd cache watcher (5-min periodic
                             cache refresh). WARNING: on macOS 15+ each refresh
                             triggers a "wx-mcp wants to access another app's
                             data" TCC prompt unless wx-mcp has Full Disk Access
                             granted in System Settings → Privacy & Security.
   --no-mcp                  Do not register MCP.
-  --mcp-client auto|claude|none
+  --mcp-client auto|claude|codex|none
   --install-dir PATH        Default: ~/.local/share/wx-mcp
   --watcher-interval SEC    Default: 300.
   --yes                     Non-interactive approval for side effects.
@@ -133,6 +139,9 @@ emit_json() {
   print "{"
   print "  \"ok\": $ok,"
   print "  \"mode\": \"$(json_escape "$MODE")\","
+  print "  \"status\": \"$(json_escape "$INSTALL_STATUS")\","
+  print "  \"blocked_by\": \"$(json_escape "$BLOCKED_BY")\","
+  print "  \"next_action\": \"$(json_escape "$NEXT_ACTION")\","
   print "  \"source_dir\": \"$(json_escape "$SOURCE_DIR")\","
   print "  \"install_dir\": \"$(json_escape "$INSTALL_DIR")\","
   print "  \"mcp_client\": \"$(json_escape "$MCP_CLIENT")\","
@@ -144,6 +153,7 @@ emit_json() {
   print "  \"watcher_installed\": $(json_bool "$WATCHER_INSTALLED"),"
   print "  \"bootstrap_ran\": $(json_bool "$BOOTSTRAP_RAN"),"
   print "  \"refresh_ran\": $(json_bool "$REFRESH_RAN"),"
+  print -n "  \"mcp_registered_clients\": "; json_array "${MCP_REGISTERED_CLIENTS[@]}"; print ","
   print -n "  \"checks\": "; json_array "${CHECKS[@]}"; print ","
   print -n "  \"actions\": "; json_array "${ACTIONS[@]}"; print ","
   print -n "  \"warnings\": "; json_array "${WARNINGS[@]}"; print ","
@@ -325,8 +335,8 @@ parse_args() {
   done
 
   case "$MCP_CLIENT" in
-    auto|claude|none) ;;
-    *) die "--mcp-client must be auto, claude, or none" 2 ;;
+    auto|claude|codex|none) ;;
+    *) die "--mcp-client must be auto, claude, codex, or none" 2 ;;
   esac
   [[ "$WATCHER_INTERVAL" == <-> ]] || die "--watcher-interval must be an integer" 2
   if [[ "$WATCHER_INTERVAL" -lt 60 ]]; then
@@ -463,25 +473,33 @@ register_mcp() {
 
   local client="$MCP_CLIENT"
   if [[ "$client" == "auto" ]]; then
+    local found=0
     if have_cmd claude; then
-      client="claude"
-    else
-      warn "no supported MCP client command found; skipping MCP registration"
-      return
+      register_claude_mcp
+      found=1
     fi
+    if have_cmd codex; then
+      register_codex_mcp
+      found=1
+    fi
+    if [[ "$found" -eq 0 ]]; then
+      warn "no supported MCP client command found; skipping MCP registration"
+    fi
+    return
   fi
   if [[ "$client" == "none" ]]; then
     return
   fi
+  case "$client" in
+    claude) register_claude_mcp ;;
+    codex) register_codex_mcp ;;
+  esac
+}
 
-  if [[ "$client" != "claude" ]]; then
-    warn "unsupported MCP client $client; skipping MCP registration"
-    return
-  fi
+register_claude_mcp() {
   if ! have_cmd claude; then
     die "claude command not found; use --mcp-client none or install Claude Code" 1
   fi
-
   ACTIONS+=("register Claude MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
@@ -490,6 +508,51 @@ register_mcp() {
   run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
   run_logged claude mcp add -s "$MCP_SCOPE" "$MCP_NAME" "$INSTALL_DIR/wx-mcp" || die "Claude MCP registration failed; see $INSTALL_LOG" 1
   MCP_REGISTERED=1
+  MCP_REGISTERED_CLIENTS+=("claude")
+}
+
+register_codex_mcp() {
+  if ! have_cmd codex; then
+    die "codex command not found; use --mcp-client none or install Codex CLI" 1
+  fi
+  ACTIONS+=("register Codex MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+
+  run_logged codex mcp remove "$MCP_NAME" || true
+  run_logged codex mcp add "$MCP_NAME" -- "$INSTALL_DIR/wx-mcp" || die "Codex MCP registration failed; see $INSTALL_LOG" 1
+  MCP_REGISTERED=1
+  MCP_REGISTERED_CLIENTS+=("codex")
+}
+
+classify_install_log_blocker() {
+  local text=""
+  if [[ -f "$INSTALL_LOG" ]]; then
+    text="$(tail -120 "$INSTALL_LOG" 2>/dev/null)"
+  fi
+  case "$text" in
+    *"WeChat is not ready yet"*|*"WeChat process not running"*|*"no WeChat 4.x account directory"*)
+      BLOCKED_BY="wechat_not_ready"
+      NEXT_ACTION="Open WeChat, finish login, open one chat, then rerun ./install.sh --bootstrap --refresh --yes --json."
+      ;;
+    *"Operation not permitted"*|*"codesign WeChat failed"*|*"app-management"*|*"App Management"*)
+      BLOCKED_BY="app_management_denied"
+      NEXT_ACTION="Grant App Management/Full Disk Access if macOS requests it, then rerun ./install.sh --bootstrap --refresh --yes --json."
+      ;;
+    *"task_for_pid"*|*"not permitted"*)
+      BLOCKED_BY="task_for_pid_denied"
+      NEXT_ACTION="Rerun ./wxkey bootstrap from the Mac desktop session and enter the wx-mcp hidden admin-password prompt."
+      ;;
+    *"Full Disk Access"*|*"TCC"*|*"another app"*)
+      BLOCKED_BY="full_disk_access"
+      NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wx-mcp/wx-mcp and ~/.local/share/wx-mcp/wxkey, then rerun install."
+      ;;
+    *)
+      BLOCKED_BY="bootstrap_failed"
+      NEXT_ACTION="Inspect the install log and rerun ./wxkey doctor; do not disable SIP."
+      ;;
+  esac
 }
 
 run_bootstrap() {
@@ -504,6 +567,8 @@ run_bootstrap() {
       trail=$(grep -E '^\[wxkey\]|^\[FAIL\]|ERROR:|re-elevate|task_for_pid' "$INSTALL_LOG" 2>/dev/null | tail -5 | tr '\n' '|')
       [[ -n "$trail" ]] && ERRORS+=("wxkey log tail: ${trail%|}")
     fi
+    INSTALL_STATUS="blocked"
+    classify_install_log_blocker
     die "wxkey bootstrap failed; see $INSTALL_LOG. If install.sh was run through an AI agent or non-interactive shell, the macOS password prompt cannot surface — re-run \`$INSTALL_DIR/wxkey bootstrap\` directly on the Mac's desktop (no sudo)." 1
   fi
   BOOTSTRAP_RAN=1
@@ -511,11 +576,20 @@ run_bootstrap() {
 
 run_cache_refresh() {
   [[ "$DO_REFRESH" -eq 1 ]] || return
-  ACTIONS+=("run wx-mcp cache refresh")
+  ACTIONS+=("start wx-mcp cache refresh in background")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
-  run_logged "$INSTALL_DIR/wx-mcp" cache refresh || die "cache refresh failed; see $INSTALL_LOG" 1
+  if [[ "${WX_MCP_INSTALL_SYNC_REFRESH:-0}" == "1" ]]; then
+    ACTIONS+=("run wx-mcp cache refresh in foreground because WX_MCP_INSTALL_SYNC_REFRESH=1")
+    run_logged "$INSTALL_DIR/wx-mcp" cache refresh || die "cache refresh failed; see $INSTALL_LOG" 1
+    INSTALL_STATUS="ready"
+  else
+    run_logged "$INSTALL_DIR/wx-mcp" cache refresh --background || die "cache refresh background start failed; see $INSTALL_LOG" 1
+    INSTALL_STATUS="warming_cache"
+    NEXT_ACTION="wx-mcp is installed; cache refresh is warming in the background and cache-backed tools will freshness-check before returning data."
+    CHECKS+=("cache_refresh_background=true")
+  fi
   REFRESH_RAN=1
 }
 
@@ -611,6 +685,7 @@ doctor() {
   [[ -f "$INSTALL_DIR/libWCDB.dylib" ]] && CHECKS+=("installed_libWCDB=true") || CHECKS+=("installed_libWCDB=false")
   have_cmd go && CHECKS+=("go=true") || CHECKS+=("go=false")
   have_cmd claude && CHECKS+=("claude=true") || CHECKS+=("claude=false")
+  have_cmd codex && CHECKS+=("codex=true") || CHECKS+=("codex=false")
   [[ -f "$PLIST_PATH" ]] && CHECKS+=("watcher_plist=true") || CHECKS+=("watcher_plist=false")
   if [[ -f "$PLIST_PATH" ]] && have_cmd launchctl; then
     if launchctl print "gui/$(id -u)/$WATCHER_LABEL" >/dev/null 2>&1; then

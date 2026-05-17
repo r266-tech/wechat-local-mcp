@@ -20,9 +20,10 @@ still review `git status --short` before publishing changes.
 wx-mcp reads local WeChat databases in readonly mode. First-run key extraction is
 handled by the companion `wxkey` CLI and requests administrator privileges to
 read the local WeChat process memory. The supported path is no-SIP only:
-`wxkey bootstrap` stores the user's sudo password in macOS Keychain, ad-hoc
-signs the local WeChat.app when macOS denies `task_for_pid`, and future key
-refreshes reuse the Keychain credential through `sudo -S`.
+`wxkey bootstrap` stores the user's sudo password in macOS Keychain, prepares an
+ad-hoc signed wx-mcp shadow copy of WeChat when the installed app is protected by
+macOS app-management controls, and future key refreshes reuse the Keychain
+credential through `sudo -S`.
 
 Run these commands when diagnosing a new machine:
 
