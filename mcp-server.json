@@ -1,6 +1,6 @@
 {
   "name": "wx-mcp",
-  "version": "1.4.8",
+  "version": "1.5.0",
   "description": "Agent-first MCP server for local WeChat 4.x data on macOS and Windows.",
   "homepage": "https://github.com/r266-tech/wechat-local-mcp",
   "license": "MIT",
@@ -22,8 +22,8 @@
   "runtime": {
     "requires": [
       "WeChat 4.x local data directory for the current OS user",
-      "macOS release zip includes wx-mcp, wxkey, libWCDB.dylib, install.sh, docs, and manifest",
-      "Windows release zip includes wx-mcp.exe, libWCDB.dll, install.ps1, docs, and manifest",
+      "macOS release zip includes wx-mcp, wxkey, libWCDB.dylib, install.sh, README.md, llms.txt, AGENTS.md, and mcp-server.json",
+      "Windows release zip includes wx-mcp.exe, libWCDB.dll, install.ps1, README.md, llms.txt, AGENTS.md, and mcp-server.json",
       "schema-2 WeChat DB key map is created by macOS wxkey bootstrap or Windows process scan",
       "macOS key setup uses wxkey bootstrap; Windows key setup scans a running Weixin.exe/WeChat.exe process and stores verified schema-2 keys"
     ],

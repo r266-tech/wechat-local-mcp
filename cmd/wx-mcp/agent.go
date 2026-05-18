@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/r266-tech/wx-mcp/internal/wcdb"
+	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
 )
 
 type chatCandidate struct {

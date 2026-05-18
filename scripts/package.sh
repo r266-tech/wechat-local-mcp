@@ -42,7 +42,7 @@ echo "→ bundling libWCDB.dylib ($(du -h "$DYLIB_SRC" | cut -f1))..."
 cp "$DYLIB_SRC" "$DIST/libWCDB.dylib"
 
 echo "→ copying docs..."
-cp README.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md AGENTS.md mcp-server.json "$DIST/"
+cp README.md llms.txt LICENSE SECURITY.md THIRD_PARTY_NOTICES.md AGENTS.md mcp-server.json "$DIST/"
 
 echo "→ copying installer..."
 cp install.sh "$DIST/"
