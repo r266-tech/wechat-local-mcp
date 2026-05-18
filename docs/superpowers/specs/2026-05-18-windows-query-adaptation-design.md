@@ -176,7 +176,7 @@ Files:
 Command:
 
 ```powershell
-.\install.ps1 --all --yes --json
+.\install.ps1 -All -Yes -Json
 ```
 
 Behavior:
@@ -186,8 +186,10 @@ Behavior:
 - Register supported MCP clients when their CLIs exist:
   - `codex mcp add wx-mcp -- <install-dir>\wx-mcp.exe`
   - `claude mcp add -s user wx-mcp <install-dir>\wx-mcp.exe`
-- Run `wx-mcp.exe cache refresh --background` when `--all` or `--refresh` is
-  provided and config is ready.
+- Run `wx-mcp.exe cache refresh --force` in the foreground when `-All` or
+  `-Refresh` is provided, so the installer only reports `ready` after Windows
+  key setup and cache build have actually succeeded. `-BackgroundRefresh` is an
+  explicit opt-in for fire-and-forget preheating.
 - Emit one JSON object with `status`, `actions`, `warnings`, `errors`,
   `blocked_by`, `next_action`, and `log`.
 - If keys or DLL are missing, return `status=blocked` with actionable
@@ -200,7 +202,7 @@ Add Windows package support while keeping Darwin packaging intact.
 Files:
 
 - `scripts/package.sh`
-- optionally `scripts/package.ps1`
+- `scripts/package-windows.ps1`
 - `mcp-server.json`
 
 Outputs:
@@ -325,7 +327,7 @@ Windows runtime:
   writes schema-2 keys; if scan fails, it returns an actionable mismatch/login
   error.
 - `cache refresh --background` starts without `/bin/sh`.
-- `install.ps1 --all --yes --json` emits valid JSON in success and blocked
+- `install.ps1 -All -Yes -Json` emits valid JSON in success and blocked
   states.
 
 Performance:

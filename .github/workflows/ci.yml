@@ -6,11 +6,43 @@ on:
 
 jobs:
   test:
-    runs-on: macos-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - run: go test ./...
-      - run: go build -o wx-mcp ./cmd/wx-mcp
+      - name: Build wx-mcp (macOS)
+        if: runner.os == 'macOS'
+        run: go build -trimpath -o wx-mcp ./cmd/wx-mcp
+      - name: Build wx-mcp (Windows)
+        if: runner.os == 'Windows'
+        run: go build -trimpath -o wx-mcp.exe ./cmd/wx-mcp
+      - name: Parse PowerShell installers
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($script in @(".\install.ps1", ".\scripts\package-windows.ps1")) {
+            $errors = $null
+            [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -LiteralPath $script), [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              $errors | Format-List *
+              exit 1
+            }
+          }
+      - name: Windows installer doctor smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $result = .\install.ps1 -Doctor -Json | ConvertFrom-Json
+          if ($result.platform -ne "windows" -or $result.mode -ne "doctor") {
+            $result | ConvertTo-Json -Depth 8
+            exit 1
+          }

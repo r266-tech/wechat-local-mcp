@@ -1,8 +1,9 @@
 # wx-mcp Agent Guide
 
-This repository is meant to be installed and operated by an agent for a user.
+This repository is meant to be installed and operated by an agent for a user on
+macOS or Windows.
 
-> **One-time human-in-the-loop step:** `wxkey bootstrap` (run as part of
+> **macOS one-time human-in-the-loop step:** `wxkey bootstrap` (run as part of
 > `install.sh --all`) needs `task_for_pid` permission. The supported path is
 > no-SIP only: prepare an ad-hoc signed wx-mcp shadow copy of WeChat when
 > needed, ask the user for their Mac admin password once, verify it with sudo,
@@ -14,10 +15,13 @@ This repository is meant to be installed and operated by an agent for a user.
 ## Fast Path
 
 If the user gives you the GitHub repository URL, prefer the latest release zip
-over a source clone. The release zip is the complete install unit: `wx-mcp`,
-`wxkey`, `libWCDB.dylib`, `install.sh`, docs, and manifest.
-Use the stable release asset name `wx-mcp-latest-darwin-arm64.zip` when it is
-present; otherwise pick the newest versioned `wx-mcp-v*-darwin-arm64.zip`.
+for the user's OS over a source clone. The macOS release zip is the complete
+install unit: `wx-mcp`, `wxkey`, `libWCDB.dylib`, `install.sh`, docs, and
+manifest. The Windows release zip is the complete install unit:
+`wx-mcp.exe`, `libWCDB.dll`, `install.ps1`, docs, and manifest.
+Use the stable release asset name `wx-mcp-latest-darwin-arm64.zip` or
+`wx-mcp-latest-windows-amd64.zip` when present; otherwise pick the newest
+versioned asset for the same platform.
 
 ```bash
 ./install.sh --dry-run --all --json
@@ -29,7 +33,8 @@ present; otherwise pick the newest versioned `wx-mcp-v*-darwin-arm64.zip`.
 On Windows, use the PowerShell installer:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --all --yes --json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -All -Json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
 ```
 
 If WeChat data is in a custom location, set `WX_MCP_DB_ROOT` to the account
@@ -37,7 +42,8 @@ directory that directly contains `db_storage`. With Windows WeChat logged in,
 wx-mcp scans `Weixin.exe` / `WeChat.exe` for SQLCipher raw-key literals,
 verifies them against the local DB files, and stores the schema-2 key map in
 `%USERPROFILE%\.config\wxcli\config.json`. Do not run macOS `wxkey bootstrap`
-on Windows.
+on Windows. The Windows installer runs the first cache refresh in the foreground
+by default so key-scan failures are visible before it reports `status=ready`.
 
 Treat `status=ready` and `status=warming_cache` as successful install states.
 `warming_cache` means cache preheating is running in the background; cache-backed
@@ -45,13 +51,19 @@ tools still freshness-check before returning data.
 
 ## Update Path
 
-For an existing git checkout:
+For an existing macOS git checkout:
 
 ```bash
 ./install.sh --update --yes --json
 ```
 
 This runs `git pull --ff-only` when possible, then reinstalls the binaries. It does not rerun key bootstrap, cache refresh, MCP registration, or watcher setup unless those flags are explicitly added.
+
+For an existing Windows checkout or newly downloaded Windows release zip:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Update -Yes -Json
+```
 
 After install, verify with:
 
@@ -63,10 +75,11 @@ Then call MCP tools, starting with `sessions` or `resolve_chat`.
 
 ## Required Runtime Facts
 
-- macOS arm64 and WeChat 4.x.
-- Runtime DB reads and key refreshes do not require disabling SIP after `wxkey bootstrap` has stored the sudo credential and written a schema-2 key map.
-- First key setup should use `./wxkey bootstrap`. It may quit/reopen WeChat, sign a wx-mcp shadow copy, and store a wx-mcp sudo credential in Keychain.
-- `libWCDB.dylib` must be present beside `wx-mcp`, in `~/.config/wxcli/lib/`, or via `WX_MCP_WCDB_DYLIB`.
+- macOS arm64 with WeChat 4.x, or Windows amd64 with Windows WeChat/Weixin 4.x.
+- macOS runtime DB reads and key refreshes do not require disabling SIP after `wxkey bootstrap` has stored the sudo credential and written a schema-2 key map.
+- macOS first key setup should use `./wxkey bootstrap`. It may quit/reopen WeChat, sign a wx-mcp shadow copy, and store a wx-mcp sudo credential in Keychain.
+- Windows first key setup is built into `wx-mcp.exe cache refresh --force`; keep Windows WeChat logged in and open at least one chat first.
+- `libWCDB.dylib` must be present beside `wx-mcp` on macOS; `libWCDB.dll` must be present beside `wx-mcp.exe` on Windows.
 
 ## TCC Quiet-Mode (recommend to user once)
 
@@ -94,7 +107,8 @@ unless the user explicitly wants background CPU cost.
 
 ## Failure Handling
 
-- If key setup fails, inspect installer `blocked_by` / `next_action`, then run `./wxkey doctor` if needed. Do not suggest disabling SIP; the supported recovery path is fixing the no-SIP sudo/Keychain route.
+- If macOS key setup fails, inspect installer `blocked_by` / `next_action`, then run `./wxkey doctor` if needed. Do not suggest disabling SIP; the supported recovery path is fixing the no-SIP sudo/Keychain route.
+- If Windows key setup fails, inspect installer `blocked_by` / `next_action`, confirm WeChat/Weixin is logged in, confirm `WX_MCP_DB_ROOT` points to the account directory that directly contains `db_storage`, and rerun `.\wx-mcp.exe cache refresh --force`.
 - If a display-name chat lookup fails, call `resolve_chat` and pass the returned raw `username`.
 - If cache-dependent filters fail, inspect `cache_status`; normal tool calls should already have attempted an automatic refresh.
 - Treat `errors[]`, `parse_error`, missing enrichment fields, and cache `message_errors` as actionable diagnostics, not prose.

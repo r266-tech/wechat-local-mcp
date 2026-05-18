@@ -2,7 +2,11 @@ param(
   [switch]$All,
   [switch]$Yes,
   [switch]$Json,
+  [switch]$DryRun,
+  [switch]$Update,
+  [switch]$Uninstall,
   [switch]$Refresh,
+  [switch]$BackgroundRefresh,
   [switch]$Doctor,
   [switch]$NoMcp,
   [string]$McpClient = "auto",
@@ -25,11 +29,13 @@ $warnings = New-Object System.Collections.Generic.List[string]
 $errors = New-Object System.Collections.Generic.List[string]
 $checks = New-Object System.Collections.Generic.List[string]
 $registered = New-Object System.Collections.Generic.List[string]
+$mode = "install"
 $status = "ok"
 $blockedBy = ""
 $nextAction = ""
 $logDir = Join-Path $InstallDir "logs"
 $log = Join-Path $logDir "install.log"
+$refreshRan = $false
 
 function Add-Action([string]$s) { $actions.Add($s) | Out-Null }
 function Add-Warning([string]$s) { $warnings.Add($s) | Out-Null }
@@ -44,13 +50,16 @@ function Finish {
   $out = [ordered]@{
     name = "wx-mcp"
     platform = "windows"
+    mode = $script:mode
     status = $script:status
     blocked_by = $script:blockedBy
     next_action = $script:nextAction
     install_dir = $InstallDir
     log = $log
+    dry_run = [bool]$DryRun
     mcp_registered = ($registered.Count -gt 0)
     mcp_registered_clients = @($registered)
+    refresh_ran = [bool]$script:refreshRan
     actions = @($actions)
     warnings = @($warnings)
     errors = @($errors)
@@ -94,6 +103,19 @@ function Resolve-WcdbDll {
     }
   }
   throw "WCDB DLL not found; put libWCDB.dll or WCDB.dll beside install.ps1, under .\lib, under ~/.config/wxcli/lib, or set WX_MCP_WCDB_LIB"
+}
+
+function Confirm-Or-Die {
+  if ($DryRun) { return }
+  if ($Yes) { return }
+  if ($Json) {
+    throw "non-interactive install/update/uninstall requires -Yes"
+  }
+  $answer = Read-Host "Proceed with wx-mcp $mode into $InstallDir? [y/N]"
+  if ($answer -notin @("y", "Y", "yes", "YES")) {
+    $script:status = "cancelled"
+    Finish 1
+  }
 }
 
 function Copy-InstallDocs {
@@ -151,34 +173,46 @@ function Register-Mcp {
   }
 }
 
-function Run-Doctor {
-  $checks.Add("os=Windows") | Out-Null
-  $checks.Add("install_dir_exists=$(Test-Path $InstallDir)") | Out-Null
-  $checks.Add("installed_wx_mcp=$(Test-Path (Join-Path $InstallDir 'wx-mcp.exe'))") | Out-Null
-  $checks.Add("installed_libWCDB=$(Test-Path (Join-Path $InstallDir 'libWCDB.dll'))") | Out-Null
-  $checks.Add("go=$(Have-Command 'go')") | Out-Null
-  $checks.Add("codex=$(Have-Command 'codex')") | Out-Null
-  $checks.Add("claude=$(Have-Command 'claude')") | Out-Null
+function Resolve-Components {
+  $wx = Resolve-WxMcp
+  $dll = Resolve-WcdbDll
+  return @{ Wx = $wx; Dll = $dll }
 }
 
-try {
-  if ($Doctor) {
-    Run-Doctor
-    Finish 0
-  }
-
-  if (-not $Yes -and -not $Json) {
-    $answer = Read-Host "Proceed with wx-mcp install into $InstallDir? [y/N]"
-    if ($answer -notin @("y", "Y", "yes", "YES")) {
-      $status = "cancelled"
-      Finish 1
+function Update-Source {
+  if (Test-Path (Join-Path $SourceDir ".git")) {
+    if (-not (Have-Command "git")) {
+      throw "git checkout update requested, but git is not available"
     }
+    Add-Action "git pull --ff-only in $SourceDir"
+    if (-not $DryRun) {
+      New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+      Push-Location $SourceDir
+      try {
+        & git pull --ff-only 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "git pull --ff-only failed with exit code $LASTEXITCODE" }
+      } finally {
+        Pop-Location
+      }
+    }
+  } else {
+    Add-Warning "source directory is not a git checkout; -Update reinstalls the files currently on disk. For release zip installs, download the newest zip first."
+  }
+}
+
+function Install-Components {
+  $components = Resolve-Components
+  if ($DryRun) {
+    Add-Action "would install wx-mcp.exe into $InstallDir"
+    Add-Action "would copy WCDB DLL into $InstallDir"
+    Add-Action "would copy installer docs and manifest"
+    return
   }
 
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-  $wx = Resolve-WxMcp
+  $wx = $components.Wx
   if ($wx.Mode -eq "build") {
     Push-Location $wx.Path
     try {
@@ -192,38 +226,110 @@ try {
     Copy-Item -LiteralPath $wx.Path -Destination (Join-Path $InstallDir "wx-mcp.exe") -Force
   }
 
-  $dll = Resolve-WcdbDll
+  $dll = $components.Dll
   $dllName = Split-Path $dll -Leaf
   Copy-Item -LiteralPath $dll -Destination (Join-Path $InstallDir $dllName) -Force
   if ($dllName -ne "libWCDB.dll") {
     Copy-Item -LiteralPath $dll -Destination (Join-Path $InstallDir "libWCDB.dll") -Force
   }
   Copy-InstallDocs
+}
 
-  Register-Mcp
-
-  if ($All -or $Refresh) {
+function Run-CacheRefresh {
+  if (-not ($All -or $Refresh)) { return }
+  $exe = Join-Path $InstallDir "wx-mcp.exe"
+  if ($BackgroundRefresh) {
     Add-Action "start cache refresh in background"
-    try {
-      & (Join-Path $InstallDir "wx-mcp.exe") cache refresh --background 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "cache refresh failed with exit code $LASTEXITCODE" }
-      $status = "warming_cache"
-      $nextAction = "wx-mcp is installed; cache refresh is warming in the background."
-    } catch {
-      $status = "blocked"
-      $blockedBy = "cache_refresh_failed"
-      $nextAction = "Provide a ready schema-2 config.json with db_root and keys, set WX_MCP_CONFIG or WX_MCP_DB_ROOT if needed, then rerun install.ps1 --refresh --yes --json."
-      Add-ErrorText $_.Exception.Message
-      Finish 1
-    }
-  } else {
+    if ($DryRun) { return }
+    & $exe cache refresh --background 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "cache refresh background start failed with exit code $LASTEXITCODE" }
+    $script:status = "warming_cache"
+    $script:nextAction = "wx-mcp is installed; cache refresh is warming in the background."
+    $script:refreshRan = $true
+    return
+  }
+
+  Add-Action "run cache refresh in foreground to verify Windows key setup"
+  if ($DryRun) { return }
+  & $exe cache refresh --force 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "cache refresh failed with exit code $LASTEXITCODE" }
+  $script:status = "ready"
+  $script:nextAction = "wx-mcp is installed and the cache refresh completed."
+  $script:refreshRan = $true
+}
+
+function Uninstall-WxMcp {
+  Add-Action "remove install directory $InstallDir"
+  if (-not $DryRun -and (Test-Path $InstallDir)) {
+    Remove-Item -LiteralPath $InstallDir -Recurse -Force
+  }
+  $script:status = "removed"
+}
+
+function Run-Doctor {
+  $checks.Add("os=Windows") | Out-Null
+  $checks.Add("install_dir_exists=$(Test-Path $InstallDir)") | Out-Null
+  $checks.Add("installed_wx_mcp=$(Test-Path (Join-Path $InstallDir 'wx-mcp.exe'))") | Out-Null
+  $checks.Add("installed_libWCDB=$(Test-Path (Join-Path $InstallDir 'libWCDB.dll'))") | Out-Null
+  $checks.Add("go=$(Have-Command 'go')") | Out-Null
+  $checks.Add("codex=$(Have-Command 'codex')") | Out-Null
+  $checks.Add("claude=$(Have-Command 'claude')") | Out-Null
+}
+
+try {
+  if ($Doctor) { $mode = "doctor" }
+  elseif ($Uninstall) { $mode = "uninstall" }
+  elseif ($Update) { $mode = "update" }
+
+  if ($Doctor) {
+    Run-Doctor
+    Finish 0
+  }
+
+  Confirm-Or-Die
+
+  if ($Uninstall) {
+    Uninstall-WxMcp
+    Finish 0
+  }
+
+  if ($Update) {
+    Update-Source
+  }
+
+  Install-Components
+  if (-not $DryRun) {
+    Register-Mcp
+  }
+  Run-CacheRefresh
+  if ($DryRun) {
+    $status = "dry_run"
+    $nextAction = "Dry run only; rerun install.ps1 -All -Yes -Json to install."
+  } elseif (-not ($All -or $Refresh)) {
     $status = "ready"
+  } else {
+    # Run-CacheRefresh already set status and next_action.
   }
   Finish 0
 } catch {
   $status = "blocked"
   if ([string]::IsNullOrWhiteSpace($blockedBy)) { $blockedBy = "install_failed" }
-  if ([string]::IsNullOrWhiteSpace($nextAction)) { $nextAction = "Fix the reported error and rerun install.ps1 --all --yes --json." }
+  $message = $_.Exception.Message
+  if ($message -match "no running Weixin.exe/WeChat.exe") {
+    $blockedBy = "wechat_not_running"
+    $nextAction = "Start Windows WeChat, finish login, open one chat, then rerun install.ps1 -All -Yes -Json."
+  } elseif ($message -match "no usable Windows WeChat raw keys") {
+    $blockedBy = "key_scan_failed"
+    $nextAction = "Verify WX_MCP_DB_ROOT belongs to the logged-in Windows WeChat account; if multiple WeChat processes exist, set WX_MCP_WECHAT_PID and rerun install.ps1 -All -Yes -Json."
+  } elseif ($message -match "no account directory with db_storage|WX_MCP_DB_ROOT") {
+    $blockedBy = "db_root_not_found"
+    $nextAction = "Set WX_MCP_DB_ROOT to the WeChat account directory that directly contains db_storage, then rerun install.ps1 -All -Yes -Json."
+  } elseif ($message -match "WCDB DLL") {
+    $blockedBy = "wcdb_dll_missing"
+    $nextAction = "Use the Windows release zip with libWCDB.dll included, or put libWCDB.dll beside install.ps1, then rerun install.ps1 -All -Yes -Json."
+  } elseif ([string]::IsNullOrWhiteSpace($nextAction)) {
+    $nextAction = "Fix the reported error and rerun install.ps1 -All -Yes -Json."
+  }
   Add-ErrorText $_.Exception.Message
   Write-Log $_.Exception.Message
   Finish 1

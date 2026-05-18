@@ -66,11 +66,18 @@ Open PowerShell in the package directory:
 
 ```powershell
 cd D:\wx-mcp
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --all --yes --json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -All -Json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
 ```
 
 By default, the installer uses `%LOCALAPPDATA%\wx-mcp` unless an install
 directory is provided.
+
+`-All` runs the first `cache refresh --force` in the foreground. The installer
+only returns `status=ready` after `wx-mcp` has verified Windows key extraction
+and built the cache. If you only want to start refresh in the background, add
+`-BackgroundRefresh`; in that mode `status=warming_cache` means the background
+process was launched, not that key extraction has already completed.
 
 ## Install To D:\wx-mcp
 
@@ -78,7 +85,7 @@ To install directly into `D:\wx-mcp`:
 
 ```powershell
 cd D:\wx-mcp-source
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --all --yes --json -InstallDir D:\wx-mcp
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json -InstallDir D:\wx-mcp
 ```
 
 Equivalent environment variable:
@@ -200,7 +207,7 @@ When used through an MCP client, call tools such as `sessions`, `messages`,
 Use:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --all --yes --json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
 ```
 
 ### No account directory with db_storage found
