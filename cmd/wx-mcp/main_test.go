@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,7 +220,15 @@ func TestRefreshReasonAlreadySatisfiedReloadsMissingSalt(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
 	salt := "0123456789abcdef0123456789abcdef"
-	if err := os.WriteFile(cfgPath, []byte(`{"wxid":"wxid_test","db_root":"`+dir+`","keys":{"`+salt+`":"enc"}}`), 0o600); err != nil {
+	cfgBytes, err := json.Marshal(config.Config{
+		Wxid:   "wxid_test",
+		DBRoot: dir,
+		Keys:   map[string]string{salt: "enc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, cfgBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("WX_MCP_CONFIG", cfgPath)
