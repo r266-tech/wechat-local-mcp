@@ -27,13 +27,18 @@ func FindBinary() (string, error) {
 		}
 	}
 	if exe, err := os.Executable(); err == nil {
-		cand := filepath.Join(filepath.Dir(exe), "wxkey")
-		if _, err := os.Stat(cand); err == nil {
-			return cand, nil
+		dir := filepath.Dir(exe)
+		for _, name := range binaryNames() {
+			cand := filepath.Join(dir, name)
+			if _, err := os.Stat(cand); err == nil {
+				return cand, nil
+			}
 		}
 	}
-	if p, err := exec.LookPath("wxkey"); err == nil {
-		return p, nil
+	for _, name := range binaryNames() {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
 	}
 	return "", fmt.Errorf("wxkey binary not found — set $WX_KEY_BIN, install wxkey alongside wx-mcp, or put wxkey on PATH")
 }
@@ -58,12 +63,18 @@ type ResultEntry struct {
 	VerifyAs string `json:"verify_as"`
 }
 
-// RunSetup invokes `wxkey setup` and parses its JSON output. The CLI handles
-// admin elevation by reusing the wx-mcp Keychain sudo credential; wx-mcp just
-// shells out and reads JSON. It intentionally does not run `wxkey bootstrap`,
-// because bootstrap may quit, ad-hoc re-sign, and reopen WeChat.
+// RunSetup refreshes schema-2 per-DB keys. On macOS/Linux builds this invokes
+// the standalone `wxkey setup` helper and parses its JSON output. On Windows it
+// uses the in-process adapter in setup_windows.go.
+//
+// The macOS path intentionally does not run `wxkey bootstrap`, because
+// bootstrap may quit, ad-hoc re-sign, and reopen WeChat.
 // stderrText is also returned so wx-mcp can surface progress / errors.
 func RunSetup() (*SetupResult, string, error) {
+	return runSetup()
+}
+
+func runSetupExternal() (*SetupResult, string, error) {
 	bin, err := FindBinary()
 	if err != nil {
 		return nil, "", err

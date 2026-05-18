@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -76,39 +77,32 @@ type server struct {
 	cfg            *config.Config
 	wcdbPath       string
 	ok             bool
+	keyRefreshMu   sync.Mutex
 	keyRefreshLast map[string]time.Time
 }
 
-// findWCDB locates libWCDB.dylib. Looks in this order:
-//  1. next to the wx-mcp binary (release archive layout: bin/wx-mcp + lib/dylib)
-//  2. ~/.config/wxcli/lib/ (shared install)
+// findWCDB locates the platform WCDB dynamic library.
 func findWCDB() (string, error) {
 	var candidates []string
+	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_LIB")); p != "" {
+		candidates = append(candidates, p)
+	}
 	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_DYLIB")); p != "" {
 		candidates = append(candidates, p)
 	}
-	if exe, err := os.Executable(); err == nil {
-		if exe, err = filepath.EvalSymlinks(exe); err == nil {
-			dir := filepath.Dir(exe)
-			candidates = append(candidates,
-				filepath.Join(dir, "libWCDB.dylib"),
-				filepath.Join(dir, "lib", "libWCDB.dylib"),
-				filepath.Join(dir, "..", "lib", "libWCDB.dylib"),
-				filepath.Join(dir, "lib", "WCDB.framework", "Versions", "2.1.15", "WCDB"),
-			)
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".config", "wxcli", "lib", "libWCDB.dylib"))
-	}
+	candidates = append(candidates, wcdbLibraryCandidates()...)
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WX_MCP_WCDB_DYLIB")
+	return "", errors.New(wcdbLibraryMissingMessage())
 }
 
+/*
+		return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WX_MCP_WCDB_DYLIB")
+	}
+*/
 func (s *server) ensure() error {
 	if s.ok {
 		return nil
@@ -147,6 +141,19 @@ func (s *server) ensure() error {
 }
 
 func (s *server) refreshKeysFromWxkey(reason string) error {
+	s.keyRefreshMu.Lock()
+	defer s.keyRefreshMu.Unlock()
+
+	if s.refreshReasonAlreadySatisfied(reason) {
+		return nil
+	}
+	if !wxkey.SetupSupported() {
+		msg := wxkey.UnsupportedSetupMessage()
+		if msg == "" {
+			msg = "automatic key extraction is not supported on this platform"
+		}
+		return fmt.Errorf("%s Reason: %s", msg, reason)
+	}
 	const retryInterval = 30 * time.Second
 	key := keyRefreshReasonKey(reason)
 	if s.keyRefreshLast == nil {
@@ -156,10 +163,10 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 		return fmt.Errorf("%s; wxkey setup was already attempted recently for this condition", reason)
 	}
 	s.keyRefreshLast[key] = time.Now()
-	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running `wxkey setup` with stored sudo credential...\n", reason)
+	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running wxkey key setup...\n", reason)
 	res, stderr, err := wxkey.RunSetup()
 	if err != nil {
-		return fmt.Errorf("wxkey setup failed: %w\n%s\nRun `wxkey bootstrap` once to store the sudo credential and prepare the no-SIP key cache.", err, stderr)
+		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WX_MCP_DB_ROOT matches the logged-in account, then retry.", err, stderr)
 	}
 	fresh, err := config.Load()
 	if err != nil {
@@ -173,6 +180,25 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey setup OK — %d per-DB keys cached for wxid=%s\n",
 		len(res.Keys), res.WxID)
 	return nil
+}
+
+func (s *server) refreshReasonAlreadySatisfied(reason string) bool {
+	fresh, err := config.Load()
+	if err != nil || !fresh.Ready() {
+		return false
+	}
+	reasonKey := keyRefreshReasonKey(reason)
+	if strings.HasPrefix(reasonKey, "salt:") {
+		salt := strings.TrimPrefix(reasonKey, "salt:")
+		if _, ok := fresh.Keys[salt]; !ok {
+			return false
+		}
+	} else if reasonKey != "empty-schema2-key-map" {
+		return false
+	}
+	s.cfg = fresh
+	s.ok = true
+	return true
 }
 
 func keyRefreshReasonKey(reason string) string {

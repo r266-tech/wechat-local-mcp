@@ -13,10 +13,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/r266-tech/wx-mcp/internal/config"
@@ -76,7 +77,7 @@ func (s *server) activeConfigNoSetup() (*config.Config, error) {
 }
 
 func cachePathsFor(cfg *config.Config) (cachePaths, error) {
-	home, err := os.UserHomeDir()
+	home, err := wxMCPHomeDir()
 	if err != nil {
 		return cachePaths{}, err
 	}
@@ -348,11 +349,10 @@ func spawnBackgroundCacheRefresh(force bool, lockPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	home, err := os.UserHomeDir()
+	logDir, err := cacheLogDir()
 	if err != nil {
 		return "", err
 	}
-	logDir := filepath.Join(home, "Library", "Logs", "wx-mcp")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return "", err
 	}
@@ -367,25 +367,11 @@ func spawnBackgroundCacheRefresh(force bool, lockPath string) (string, error) {
 	if force {
 		args = append(args, "--force")
 	}
-	script := `
-lock="$1"; shift
-log="$1"; shift
-ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
-cleanup() {
-  rc=$?
-  echo "$(ts) cache refresh background exit=$rc" >> "$log"
-  rmdir "$lock" 2>/dev/null || rm -rf "$lock"
-}
-trap cleanup EXIT INT TERM
-echo "$(ts) cache refresh background start pid=$$" >> "$log"
-WX_MCP_CACHE_LOCK_HELD=1 "$@"
-exit $?
-`
-	cmd := exec.Command("/bin/sh", append([]string{"-c", script, "wx-mcp-cache-refresh-bg", lockPath, logPath, exe}, args...)...)
-	cmd.Env = os.Environ()
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "WX_MCP_CACHE_LOCK_HELD="+lockPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureBackgroundCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
@@ -421,7 +407,7 @@ func acquireCacheRefreshLock() (func(), bool, string, error) {
 		}
 		return func() { _ = os.Remove(held) }, true, held, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := wxMCPHomeDir()
 	if err != nil {
 		return nil, false, "", err
 	}
@@ -469,57 +455,14 @@ func (s *server) refreshCache(force bool) (any, error) {
 	stats := map[string]int64{"source_dbs": int64(len(sources))}
 	var errorsOut []map[string]string
 
-	for _, src := range sources {
-		meta := cacheFileMeta{
-			RelPath:    src.RelPath,
-			SourcePath: src.Source,
-			Snapshot:   src.Snapshot,
-			DBMTime:    src.DBMTime,
-			WALMTime:   src.WALMTime,
-			SaltHex:    src.SaltHex,
-			Status:     "ok",
+	for _, res := range s.snapshotSources(sources, prev, force) {
+		metas = append(metas, res.meta)
+		if res.statKey != "" {
+			stats[res.statKey]++
 		}
-		if strings.HasSuffix(src.File, "_fts.db") {
-			meta.Status = "skipped"
-			meta.Error = "source FTS DB uses WeChat custom tokenizer; wx-mcp builds its own message_fts in index.sqlite"
-			stats["skipped_fts"]++
-			metas = append(metas, meta)
-			continue
+		if res.errorOut != nil {
+			errorsOut = append(errorsOut, res.errorOut)
 		}
-		if old, ok := prev[src.RelPath]; ok && !force &&
-			old.DBMTime == src.DBMTime && old.WALMTime == src.WALMTime &&
-			old.SaltHex == src.SaltHex && fileExists(src.Snapshot) {
-			meta.CopiedAt = old.CopiedAt
-			meta.Reused = true
-			stats["reused"]++
-			metas = append(metas, meta)
-			continue
-		}
-		db, err := s.openDBWritable(src.Subdir, src.File, isCriticalCacheSource(src.RelPath))
-		if err != nil {
-			meta.Status = "error"
-			meta.Error = err.Error()
-			stats["snapshot_errors"]++
-			errorsOut = append(errorsOut, map[string]string{"rel_path": src.RelPath, "error": err.Error()})
-			metas = append(metas, meta)
-			continue
-		}
-		if err := db.BackupTo(src.Snapshot); err != nil {
-			meta.Status = "error"
-			meta.Error = err.Error()
-			stats["snapshot_errors"]++
-			errorsOut = append(errorsOut, map[string]string{"rel_path": src.RelPath, "error": err.Error()})
-			db.Close()
-			metas = append(metas, meta)
-			continue
-		}
-		db.Close()
-		meta.DBMTime = fileMTimeNanos(src.Source)
-		meta.WALMTime = fileMTimeNanos(src.Source + "-wal")
-		meta.SaltHex = readSaltHex(src.Source)
-		meta.CopiedAt = time.Now().Unix()
-		stats["snapshotted"]++
-		metas = append(metas, meta)
 	}
 
 	indexStats, indexErrors, err := s.buildCacheIndex(paths, metas)
@@ -537,6 +480,128 @@ func (s *server) refreshCache(force bool) (any, error) {
 		"stats":      stats,
 		"errors":     errorsOut,
 	}, nil
+}
+
+type snapshotResult struct {
+	meta     cacheFileMeta
+	statKey  string
+	errorOut map[string]string
+}
+
+func (s *server) snapshotSources(sources []sourceDBInfo, prev map[string]cacheFileMeta, force bool) []snapshotResult {
+	if len(sources) == 0 {
+		return nil
+	}
+	workers := cacheWorkerCount(len(sources))
+	jobs := make(chan sourceDBInfo)
+	results := make(chan snapshotResult, len(sources))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for src := range jobs {
+				results <- s.snapshotSource(src, prev, force)
+			}
+		}()
+	}
+	for _, src := range sources {
+		jobs <- src
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+	out := make([]snapshotResult, 0, len(sources))
+	for res := range results {
+		out = append(out, res)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].meta.RelPath < out[j].meta.RelPath })
+	return out
+}
+
+func cacheWorkerCount(total int) int {
+	if total <= 1 {
+		return 1
+	}
+	if raw := strings.TrimSpace(os.Getenv("WX_MCP_CACHE_WORKERS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 1 {
+				return 1
+			}
+			if n > total {
+				return total
+			}
+			return n
+		}
+	}
+	n := runtime.NumCPU()
+	if n > 4 {
+		n = 4
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > total {
+		n = total
+	}
+	return n
+}
+
+func wxMCPHomeDir() (string, error) {
+	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
+		return h, nil
+	}
+	return os.UserHomeDir()
+}
+
+func (s *server) snapshotSource(src sourceDBInfo, prev map[string]cacheFileMeta, force bool) snapshotResult {
+	meta := cacheFileMeta{
+		RelPath:    src.RelPath,
+		SourcePath: src.Source,
+		Snapshot:   src.Snapshot,
+		DBMTime:    src.DBMTime,
+		WALMTime:   src.WALMTime,
+		SaltHex:    src.SaltHex,
+		Status:     "ok",
+	}
+	if strings.HasSuffix(src.File, "_fts.db") {
+		meta.Status = "skipped"
+		meta.Error = "source FTS DB uses WeChat custom tokenizer; wx-mcp builds its own message_fts in index.sqlite"
+		return snapshotResult{meta: meta, statKey: "skipped_fts"}
+	}
+	if old, ok := prev[src.RelPath]; ok && !force &&
+		old.DBMTime == src.DBMTime && old.WALMTime == src.WALMTime &&
+		old.SaltHex == src.SaltHex && fileExists(src.Snapshot) {
+		meta.CopiedAt = old.CopiedAt
+		meta.Reused = true
+		return snapshotResult{meta: meta, statKey: "reused"}
+	}
+	db, err := s.openDBWritable(src.Subdir, src.File, isCriticalCacheSource(src.RelPath))
+	if err != nil {
+		meta.Status = "error"
+		meta.Error = err.Error()
+		return snapshotResult{
+			meta:     meta,
+			statKey:  "snapshot_errors",
+			errorOut: map[string]string{"rel_path": src.RelPath, "error": err.Error()},
+		}
+	}
+	if err := db.BackupTo(src.Snapshot); err != nil {
+		meta.Status = "error"
+		meta.Error = err.Error()
+		db.Close()
+		return snapshotResult{
+			meta:     meta,
+			statKey:  "snapshot_errors",
+			errorOut: map[string]string{"rel_path": src.RelPath, "error": err.Error()},
+		}
+	}
+	db.Close()
+	meta.DBMTime = fileMTimeNanos(src.Source)
+	meta.WALMTime = fileMTimeNanos(src.Source + "-wal")
+	meta.SaltHex = readSaltHex(src.Source)
+	meta.CopiedAt = time.Now().Unix()
+	return snapshotResult{meta: meta, statKey: "snapshotted"}
 }
 
 func (s *server) openDBWritable(subdir, file string, allowKeyRefresh bool) (*wcdb.DB, error) {
@@ -654,12 +719,21 @@ func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[s
 		return nil, nil, err
 	}
 	stats := map[string]int64{}
-	for _, f := range files {
-		_ = db.ExecArgs(`INSERT INTO cache_files
-			(rel_path, source_path, snapshot_path, db_mtime, wal_mtime, salt_hex, status, error, copied_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			f.RelPath, f.SourcePath, f.Snapshot, f.DBMTime, f.WALMTime, f.SaltHex, f.Status, f.Error, f.CopiedAt)
+	cacheFileInsert, err := db.Prepare(`INSERT INTO cache_files
+		(rel_path, source_path, snapshot_path, db_mtime, wal_mtime, salt_hex, status, error, copied_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		_ = db.Exec("ROLLBACK")
+		return nil, nil, err
 	}
+	for _, f := range files {
+		if err := cacheFileInsert.Exec(f.RelPath, f.SourcePath, f.Snapshot, f.DBMTime, f.WALMTime, f.SaltHex, f.Status, f.Error, f.CopiedAt); err != nil {
+			cacheFileInsert.Close()
+			_ = db.Exec("ROLLBACK")
+			return nil, nil, err
+		}
+	}
+	cacheFileInsert.Close()
 	display, contactCount := buildIndexContacts(db, snapshotFor(files, "contact/contact.db"))
 	stats["contacts"] = contactCount
 	tableToTalker, sessionCount := buildIndexSessions(db, snapshotFor(files, "session/session.db"), display)
@@ -671,6 +745,7 @@ func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[s
 	stats["message_rows_seen"] = msgCount
 	stats["messages"] = countTable(db, "messages_unified")
 	stats["message_errors"] = int64(len(msgErrs))
+	createIndexPostImportIndexes(db)
 	ftsReady := buildIndexFTS(db)
 	if ftsReady {
 		stats["fts_ready"] = 1
@@ -698,8 +773,10 @@ func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[s
 
 func createIndexSchema(db *wcdb.DB) error {
 	return db.Exec(`
-		PRAGMA journal_mode=WAL;
-		PRAGMA synchronous=NORMAL;
+		PRAGMA journal_mode=OFF;
+		PRAGMA synchronous=OFF;
+		PRAGMA temp_store=MEMORY;
+		PRAGMA locking_mode=EXCLUSIVE;
 		CREATE TABLE cache_meta (key TEXT PRIMARY KEY, value TEXT);
 		CREATE TABLE cache_files (
 			rel_path TEXT PRIMARY KEY,
@@ -756,6 +833,11 @@ func createIndexSchema(db *wcdb.DB) error {
 			source_table TEXT,
 			PRIMARY KEY (talker, local_id)
 		);
+	`)
+}
+
+func createIndexPostImportIndexes(db *wcdb.DB) {
+	_ = db.Exec(`
 		CREATE INDEX idx_messages_talker_sort ON messages_unified(talker, sort_seq DESC);
 		CREATE INDEX idx_messages_talker_time ON messages_unified(talker, create_time DESC);
 		CREATE INDEX idx_messages_talker_kind ON messages_unified(talker, kind_name, create_time DESC);
@@ -783,6 +865,13 @@ func buildIndexContacts(idx *wcdb.DB, path string) (map[string]string, int64) {
 	if err != nil {
 		return display, 0
 	}
+	insert, err := idx.Prepare(`INSERT OR REPLACE INTO contacts_unified
+		(username, display_name, nick_name, remark, alias, description, type, is_verified)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return display, 0
+	}
+	defer insert.Close()
 	var n int64
 	for _, r := range rows {
 		u := rowString(r, "username")
@@ -791,9 +880,7 @@ func buildIndexContacts(idx *wcdb.DB, path string) (map[string]string, int64) {
 		}
 		dn := rowString(r, "display_name")
 		display[u] = dn
-		_ = idx.ExecArgs(`INSERT OR REPLACE INTO contacts_unified
-			(username, display_name, nick_name, remark, alias, description, type, is_verified)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		_ = insert.Exec(
 			u, dn, rowString(r, "nick_name"), rowString(r, "remark"), rowString(r, "alias"),
 			rowString(r, "description"), wxkind.ClassifyUsername(u), rowInt64(r, "verify_flag") != 0)
 		n++
@@ -820,6 +907,14 @@ func buildIndexSessions(idx *wcdb.DB, path string, display map[string]string) (m
 	if err != nil {
 		return tableToTalker, 0
 	}
+	insert, err := idx.Prepare(`INSERT OR REPLACE INTO sessions_unified
+		(username, display_name, unread_count, summary, last_timestamp, sort_timestamp,
+		 last_sender_wxid, last_sender_display_name, last_msg_type, last_msg_sub_type, last_msg_kind_name)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return tableToTalker, 0
+	}
+	defer insert.Close()
 	var n int64
 	for _, r := range rows {
 		u := rowString(r, "username")
@@ -832,10 +927,7 @@ func buildIndexSessions(idx *wcdb.DB, path string, display map[string]string) (m
 		bk := rowInt64(r, "last_msg_type")
 		st := rowInt64(r, "last_msg_sub_type")
 		kind := wxkind.Resolve(int32(bk), int32(st))
-		_ = idx.ExecArgs(`INSERT OR REPLACE INTO sessions_unified
-			(username, display_name, unread_count, summary, last_timestamp, sort_timestamp,
-			 last_sender_wxid, last_sender_display_name, last_msg_type, last_msg_sub_type, last_msg_kind_name)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		_ = insert.Exec(
 			u, dn, rowInt64(r, "unread_count"), rowString(r, "summary"), rowInt64(r, "last_timestamp"),
 			rowInt64(r, "sort_timestamp"), emptyToNil(sender), emptyToNil(rowString(r, "last_sender_display_name")),
 			bk, st, kind)
@@ -848,6 +940,15 @@ func (s *server) buildIndexMessages(idx *wcdb.DB, files []cacheFileMeta, display
 	var total int64
 	var errs []map[string]string
 	self := s.selfWxid()
+	insert, err := idx.Prepare(`INSERT OR REPLACE INTO messages_unified
+		(talker, talker_display_name, local_id, server_id, create_time, create_time_human,
+		 sort_seq, sender_wxid, sender_display_name, is_from_me, base_kind, subtype,
+		 kind_name, content_summary, message_content, parsed_json, source_db, source_table)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return 0, []map[string]string{{"rel_path": "index", "error": err.Error()}}
+	}
+	defer insert.Close()
 	for _, f := range files {
 		if f.Status != "ok" || !strings.HasPrefix(f.RelPath, "message/") || !fileExists(f.Snapshot) {
 			continue
@@ -870,10 +971,11 @@ func (s *server) buildIndexMessages(idx *wcdb.DB, files []cacheFileMeta, display
 			if talker == "" || !validMsgTable(table) {
 				continue
 			}
-			for offset := 0; ; offset += 1000 {
-				rows, err := db.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
-					real_sender_id, create_time, status, message_content, source
-					FROM %s ORDER BY sort_seq DESC LIMIT ? OFFSET ?`, quoteIdent(table)), 1000, offset)
+			useSortSeq := cacheTableHasColumn(db, table, "sort_seq")
+			lastSortSeq := int64(1<<63 - 1)
+			lastLocalID := int64(1<<63 - 1)
+			for {
+				rows, err := queryMessageIndexPage(db, table, useSortSeq, lastSortSeq, lastLocalID, 1000)
 				if err != nil {
 					errs = append(errs, map[string]string{"rel_path": f.RelPath, "table": table, "error": err.Error()})
 					break
@@ -881,6 +983,9 @@ func (s *server) buildIndexMessages(idx *wcdb.DB, files []cacheFileMeta, display
 				if len(rows) == 0 {
 					break
 				}
+				last := rows[len(rows)-1]
+				lastSortSeq = rowInt64(last, "sort_seq")
+				lastLocalID = rowInt64(last, "local_id")
 				if n2i != nil {
 					rows = resolveSenders(rows, n2i)
 				}
@@ -895,11 +1000,7 @@ func (s *server) buildIndexMessages(idx *wcdb.DB, files []cacheFileMeta, display
 						}
 					}
 					isFromMe := self != "" && sender == self
-					if err := idx.ExecArgs(`INSERT OR REPLACE INTO messages_unified
-						(talker, talker_display_name, local_id, server_id, create_time, create_time_human,
-						 sort_seq, sender_wxid, sender_display_name, is_from_me, base_kind, subtype,
-						 kind_name, content_summary, message_content, parsed_json, source_db, source_table)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					if err := insert.Exec(
 						talker, displayOrRaw(display, talker), rowInt64(r, "local_id"), rowInt64(r, "server_id"),
 						rowInt64(r, "create_time"), rowString(r, "create_time_human"), rowInt64(r, "sort_seq"),
 						emptyToNil(sender), emptyToNil(senderDN), isFromMe, rowInt64(r, "base_kind"),
@@ -917,7 +1018,43 @@ func (s *server) buildIndexMessages(idx *wcdb.DB, files []cacheFileMeta, display
 	return total, errs
 }
 
+func queryMessageIndexPage(db *wcdb.DB, table string, useSortSeq bool, lastSortSeq, lastLocalID int64, limit int) ([]wcdb.Row, error) {
+	if useSortSeq {
+		return db.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, COALESCE(sort_seq, 0) AS sort_seq,
+			real_sender_id, create_time, status, message_content, source
+			FROM %s
+			WHERE COALESCE(sort_seq, 0) < ? OR (COALESCE(sort_seq, 0) = ? AND local_id < ?)
+			ORDER BY COALESCE(sort_seq, 0) DESC, local_id DESC
+			LIMIT ?`, quoteIdent(table)), lastSortSeq, lastSortSeq, lastLocalID, limit)
+	}
+	return db.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, 0 AS sort_seq,
+		real_sender_id, create_time, status, message_content, source
+		FROM %s
+		WHERE local_id < ?
+		ORDER BY local_id DESC
+		LIMIT ?`, quoteIdent(table)), lastLocalID, limit)
+}
+
+func cacheTableHasColumn(db *wcdb.DB, table, column string) bool {
+	if !validIdent(table) {
+		return false
+	}
+	rows, err := db.Query("PRAGMA table_info(" + quoteIdent(table) + ")")
+	if err != nil {
+		return false
+	}
+	for _, r := range rows {
+		if rowString(r, "name") == column {
+			return true
+		}
+	}
+	return false
+}
+
 func buildIndexFTS(db *wcdb.DB) bool {
+	if envBool("WX_MCP_CACHE_SKIP_FTS") {
+		return false
+	}
 	if err := db.Exec(`CREATE VIRTUAL TABLE message_fts USING fts5(content_summary, message_content, talker, sender_wxid)`); err != nil {
 		return false
 	}
@@ -1065,22 +1202,28 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	}
 	var rows []wcdb.Row
 	if mode == "fts" || mode == "auto" {
-		ftsWhere := append([]string{"message_fts MATCH ?"}, where...)
-		ftsArgs := append([]any{ftsPhrase(kw)}, args...)
-		ftsArgs = append(ftsArgs, limit)
-		rows, err = db.Query(fmt.Sprintf(`SELECT m.local_id, m.talker, m.talker_display_name, m.create_time,
-			m.sender_wxid, m.sender_display_name, m.base_kind, m.kind_name,
-			COALESCE(NULLIF(m.content_summary, ''), m.message_content) AS content,
-			c.type AS talker_contact_type, c.is_verified AS talker_is_verified
-			FROM message_fts f JOIN messages_unified m ON m.rowid = f.rowid
-			LEFT JOIN contacts_unified c ON c.username = m.talker
-			WHERE %s ORDER BY m.create_time DESC LIMIT ?`, strings.Join(ftsWhere, " AND ")), ftsArgs...)
-		if err != nil || mode == "fts" || len(rows) > 0 {
-			if err != nil {
-				return nil, false, err
+		if !cacheFTSReady(db) {
+			if mode == "fts" {
+				return nil, true, fmt.Errorf("cache FTS index is not ready (fts_ready=false); rebuild cache without WX_MCP_CACHE_SKIP_FTS or pass search_mode=like")
 			}
-			decorateMessageSearchRows(rows)
-			return rows, true, nil
+		} else {
+			ftsWhere := append([]string{"message_fts MATCH ?"}, where...)
+			ftsArgs := append([]any{ftsPhrase(kw)}, args...)
+			ftsArgs = append(ftsArgs, limit)
+			rows, err = db.Query(fmt.Sprintf(`SELECT m.local_id, m.talker, m.talker_display_name, m.create_time,
+				m.sender_wxid, m.sender_display_name, m.base_kind, m.kind_name,
+				COALESCE(NULLIF(m.content_summary, ''), m.message_content) AS content,
+				c.type AS talker_contact_type, c.is_verified AS talker_is_verified
+				FROM message_fts f JOIN messages_unified m ON m.rowid = f.rowid
+				LEFT JOIN contacts_unified c ON c.username = m.talker
+				WHERE %s ORDER BY m.create_time DESC LIMIT ?`, strings.Join(ftsWhere, " AND ")), ftsArgs...)
+			if err != nil || mode == "fts" || len(rows) > 0 {
+				if err != nil {
+					return nil, false, err
+				}
+				decorateMessageSearchRows(rows)
+				return rows, true, nil
+			}
 		}
 	}
 	if mode == "like" || mode == "auto" {
@@ -1104,6 +1247,17 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	}
 	decorateMessageSearchRows(rows)
 	return rows, true, nil
+}
+
+func cacheFTSReady(db *wcdb.DB) bool {
+	if !tableExists(db, "message_fts") {
+		return false
+	}
+	rows, err := db.Query("SELECT value FROM cache_meta WHERE key='fts_ready'")
+	if err != nil || len(rows) == 0 {
+		return false
+	}
+	return strings.EqualFold(rowString(rows[0], "value"), "true")
 }
 
 func decorateMessageSearchRows(rows []wcdb.Row) {

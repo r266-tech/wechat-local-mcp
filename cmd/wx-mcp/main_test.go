@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +213,32 @@ func TestKeyRefreshReasonKeyUsesMissingSalt(t *testing.T) {
 	got := keyRefreshReasonKey("no enc_key for salt 0123456789abcdef0123456789abcdef in /tmp/message.db - refresh wxkey's schema-2 key map")
 	if got != "salt:0123456789abcdef0123456789abcdef" {
 		t.Fatalf("keyRefreshReasonKey = %q", got)
+	}
+}
+
+func TestRefreshReasonAlreadySatisfiedReloadsMissingSalt(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	salt := "0123456789abcdef0123456789abcdef"
+	cfgBytes, err := json.Marshal(config.Config{
+		Wxid:   "wxid_test",
+		DBRoot: dir,
+		Keys:   map[string]string{salt: "enc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, cfgBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WX_MCP_CONFIG", cfgPath)
+	srv := &server{}
+	reason := "no enc_key for salt " + salt + " in message/message_0.db"
+	if !srv.refreshReasonAlreadySatisfied(reason) {
+		t.Fatalf("missing salt should be satisfied after config reload")
+	}
+	if srv.cfg == nil || srv.cfg.Keys[salt] != "enc" || !srv.ok {
+		t.Fatalf("server config was not refreshed: %#v ok=%v", srv.cfg, srv.ok)
 	}
 }
 
