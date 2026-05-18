@@ -29,7 +29,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          foreach ($script in @(".\install.ps1", ".\scripts\package-windows.ps1")) {
+          foreach ($script in @(".\install.ps1", ".\scripts\package-windows.ps1", ".\scripts\build-windows-wcdb.ps1")) {
             $errors = $null
             [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -LiteralPath $script), [ref]$errors)
             if ($errors -and $errors.Count -gt 0) {
