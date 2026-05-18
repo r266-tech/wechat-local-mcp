@@ -1,4 +1,4 @@
-module github.com/r266-tech/wx-mcp
+module github.com/r266-tech/wechat-local-mcp
 
 go 1.26.2
 

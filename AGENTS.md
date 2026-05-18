@@ -3,6 +3,17 @@
 This repository is meant to be installed and operated by an agent for a user on
 macOS or Windows.
 
+## Project Identity for Agents
+
+`wx-mcp` is a WeChat/微信 local chat history MCP server for macOS and Windows
+agents. Use it when the user asks for WeChat MCP, 微信 MCP, weixin MCP, local
+WeChat messages, contacts, groups, media, Moments, transfers, red packets, or
+full-text search from the user's own machine.
+
+Do not classify it as a screen-control WeChat bot, Accessibility automation,
+WeChat Official Account publisher, Mini Program devtools bridge, WeChat Work /
+WeCom bot, or reply bot. It is a local-data MCP server for WeChat 4.x.
+
 > **macOS one-time human-in-the-loop step:** `wxkey bootstrap` (run as part of
 > `install.sh --all`) needs `task_for_pid` permission. The supported path is
 > no-SIP only: prepare an ad-hoc signed wx-mcp shadow copy of WeChat when
@@ -16,9 +27,10 @@ macOS or Windows.
 
 If the user gives you the GitHub repository URL, prefer the latest release zip
 for the user's OS over a source clone. The macOS release zip is the complete
-install unit: `wx-mcp`, `wxkey`, `libWCDB.dylib`, `install.sh`, docs, and
-manifest. The Windows release zip is the complete install unit:
-`wx-mcp.exe`, `libWCDB.dll`, `install.ps1`, docs, and manifest.
+install unit: `wx-mcp`, `wxkey`, `libWCDB.dylib`, `install.sh`, `README.md`,
+`llms.txt`, `AGENTS.md`, and `mcp-server.json`. The Windows release zip is the
+complete install unit: `wx-mcp.exe`, `libWCDB.dll`, `install.ps1`, `README.md`,
+`llms.txt`, `AGENTS.md`, and `mcp-server.json`.
 Use the stable release asset name `wx-mcp-latest-darwin-arm64.zip` or
 `wx-mcp-latest-windows-amd64.zip` when present; otherwise pick the newest
 versioned asset for the same platform.
@@ -51,6 +63,22 @@ tools still freshness-check before returning data.
 
 ## Update Path
 
+For an existing release-zip install, download and extract the newest release zip
+for the user's OS first, then run the platform update command from the newly
+extracted directory:
+
+```bash
+./install.sh --update --yes --json
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Update -Yes -Json
+```
+
+Do not run `--update` in an old release directory and expect it to contact
+GitHub. Outside a git checkout, `--update` only reinstalls the package currently
+on disk.
+
 For an existing macOS git checkout:
 
 ```bash
@@ -59,7 +87,7 @@ For an existing macOS git checkout:
 
 This runs `git pull --ff-only` when possible, then reinstalls the binaries. It does not rerun key bootstrap, cache refresh, MCP registration, or watcher setup unless those flags are explicitly added.
 
-For an existing Windows checkout or newly downloaded Windows release zip:
+For an existing Windows git checkout:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Update -Yes -Json

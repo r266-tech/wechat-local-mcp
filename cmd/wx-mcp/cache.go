@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/r266-tech/wx-mcp/internal/config"
-	"github.com/r266-tech/wx-mcp/internal/wcdb"
-	"github.com/r266-tech/wx-mcp/internal/wxkind"
+	"github.com/r266-tech/wechat-local-mcp/internal/config"
+	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
+	"github.com/r266-tech/wechat-local-mcp/internal/wxkind"
 )
 
 var errCacheMissing = errors.New("cache index missing; run cache_refresh first")

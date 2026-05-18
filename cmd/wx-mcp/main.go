@@ -21,11 +21,11 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/r266-tech/wx-mcp/internal/config"
-	"github.com/r266-tech/wx-mcp/internal/wcdb"
-	"github.com/r266-tech/wx-mcp/internal/wxkey"
-	"github.com/r266-tech/wx-mcp/internal/wxkind"
-	"github.com/r266-tech/wx-mcp/internal/wxparse"
+	"github.com/r266-tech/wechat-local-mcp/internal/config"
+	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
+	"github.com/r266-tech/wechat-local-mcp/internal/wxkey"
+	"github.com/r266-tech/wechat-local-mcp/internal/wxkind"
+	"github.com/r266-tech/wechat-local-mcp/internal/wxparse"
 )
 
 // ──────────────────── MCP protocol types ────────────────────
