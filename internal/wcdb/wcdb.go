@@ -34,28 +34,30 @@ var (
 	mu     sync.Mutex
 	loaded bool
 
-	sqlite3_open_v2       func(filename string, ppDb *uintptr, flags int32, vfs *byte) int32
-	sqlite3_close_v2      func(db uintptr) int32
-	sqlite3_key_v2        func(db uintptr, zDbName string, pKey unsafe.Pointer, nKey int32) int32
-	sqlite3_exec          func(db uintptr, sql string, cb uintptr, arg uintptr, errmsg *uintptr) int32
-	sqlite3_prepare_v2    func(db uintptr, sql string, nByte int32, stmt *uintptr, tail *uintptr) int32
-	sqlite3_step          func(stmt uintptr) int32
-	sqlite3_finalize      func(stmt uintptr) int32
-	sqlite3_column_count  func(stmt uintptr) int32
-	sqlite3_column_name   func(stmt uintptr, i int32) uintptr
-	sqlite3_column_text   func(stmt uintptr, i int32) uintptr
-	sqlite3_column_int64  func(stmt uintptr, i int32) int64
-	sqlite3_column_bytes  func(stmt uintptr, i int32) int32
-	sqlite3_column_blob   func(stmt uintptr, i int32) uintptr
-	sqlite3_column_type   func(stmt uintptr, i int32) int32
-	sqlite3_bind_text     func(stmt uintptr, i int32, s string, n int32, destructor uintptr) int32
-	sqlite3_bind_blob     func(stmt uintptr, i int32, p unsafe.Pointer, n int32, destructor uintptr) int32
-	sqlite3_bind_int64    func(stmt uintptr, i int32, v int64) int32
-	sqlite3_bind_null     func(stmt uintptr, i int32) int32
-	sqlite3_errmsg        func(db uintptr) uintptr
-	sqlite3_backup_init   func(dst uintptr, dstName string, src uintptr, srcName string) uintptr
-	sqlite3_backup_step   func(backup uintptr, pages int32) int32
-	sqlite3_backup_finish func(backup uintptr) int32
+	sqlite3_open_v2        func(filename string, ppDb *uintptr, flags int32, vfs *byte) int32
+	sqlite3_close_v2       func(db uintptr) int32
+	sqlite3_key_v2         func(db uintptr, zDbName string, pKey unsafe.Pointer, nKey int32) int32
+	sqlite3_exec           func(db uintptr, sql string, cb uintptr, arg uintptr, errmsg *uintptr) int32
+	sqlite3_prepare_v2     func(db uintptr, sql string, nByte int32, stmt *uintptr, tail *uintptr) int32
+	sqlite3_step           func(stmt uintptr) int32
+	sqlite3_finalize       func(stmt uintptr) int32
+	sqlite3_column_count   func(stmt uintptr) int32
+	sqlite3_column_name    func(stmt uintptr, i int32) uintptr
+	sqlite3_column_text    func(stmt uintptr, i int32) uintptr
+	sqlite3_column_int64   func(stmt uintptr, i int32) int64
+	sqlite3_column_bytes   func(stmt uintptr, i int32) int32
+	sqlite3_column_blob    func(stmt uintptr, i int32) uintptr
+	sqlite3_column_type    func(stmt uintptr, i int32) int32
+	sqlite3_bind_text      func(stmt uintptr, i int32, s string, n int32, destructor uintptr) int32
+	sqlite3_bind_blob      func(stmt uintptr, i int32, p unsafe.Pointer, n int32, destructor uintptr) int32
+	sqlite3_bind_int64     func(stmt uintptr, i int32, v int64) int32
+	sqlite3_bind_null      func(stmt uintptr, i int32) int32
+	sqlite3_reset          func(stmt uintptr) int32
+	sqlite3_clear_bindings func(stmt uintptr) int32
+	sqlite3_errmsg         func(db uintptr) uintptr
+	sqlite3_backup_init    func(dst uintptr, dstName string, src uintptr, srcName string) uintptr
+	sqlite3_backup_step    func(backup uintptr, pages int32) int32
+	sqlite3_backup_finish  func(backup uintptr) int32
 )
 
 // Bootstrap loads the WCDB dylib from the given absolute path.
@@ -65,7 +67,7 @@ func Bootstrap(dylibPath string) error {
 	if loaded {
 		return nil
 	}
-	h, err := purego.Dlopen(dylibPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	h, err := loadLibrary(dylibPath)
 	if err != nil {
 		return fmt.Errorf("dlopen %s: %w", dylibPath, err)
 	}
@@ -91,6 +93,8 @@ func Bootstrap(dylibPath string) error {
 		{&sqlite3_bind_blob, "sqlite3_bind_blob"},
 		{&sqlite3_bind_int64, "sqlite3_bind_int64"},
 		{&sqlite3_bind_null, "sqlite3_bind_null"},
+		{&sqlite3_reset, "sqlite3_reset"},
+		{&sqlite3_clear_bindings, "sqlite3_clear_bindings"},
 		{&sqlite3_errmsg, "sqlite3_errmsg"},
 		{&sqlite3_backup_init, "sqlite3_backup_init"},
 		{&sqlite3_backup_step, "sqlite3_backup_step"},
@@ -449,6 +453,48 @@ func (d *DB) ExecArgs(sql string, args ...any) error {
 		return fmt.Errorf("step rc=%d: %s", rc, errmsg(d.handle))
 	}
 	return nil
+}
+
+type Stmt struct {
+	db     *DB
+	handle uintptr
+	sql    string
+}
+
+func (d *DB) Prepare(sql string) (*Stmt, error) {
+	var stmt uintptr
+	if rc := sqlite3_prepare_v2(d.handle, sql, -1, &stmt, nil); rc != SQLITE_OK {
+		return nil, fmt.Errorf("prepare rc=%d: %s (sql=%s)", rc, errmsg(d.handle), sql)
+	}
+	return &Stmt{db: d, handle: stmt, sql: sql}, nil
+}
+
+func (s *Stmt) Exec(args ...any) error {
+	if s == nil || s.handle == 0 {
+		return fmt.Errorf("exec on closed statement")
+	}
+	if rc := sqlite3_reset(s.handle); rc != SQLITE_OK {
+		return fmt.Errorf("reset rc=%d: %s", rc, errmsg(s.db.handle))
+	}
+	if rc := sqlite3_clear_bindings(s.handle); rc != SQLITE_OK {
+		return fmt.Errorf("clear bindings rc=%d: %s", rc, errmsg(s.db.handle))
+	}
+	if err := bindArgs(s.handle, args); err != nil {
+		return err
+	}
+	rc := sqlite3_step(s.handle)
+	if rc != SQLITE_DONE && rc != SQLITE_ROW {
+		return fmt.Errorf("step rc=%d: %s (sql=%s)", rc, errmsg(s.db.handle), s.sql)
+	}
+	return nil
+}
+
+func (s *Stmt) Close() {
+	if s == nil || s.handle == 0 {
+		return
+	}
+	sqlite3_finalize(s.handle)
+	s.handle = 0
 }
 
 type Row map[string]any

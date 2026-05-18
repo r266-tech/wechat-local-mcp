@@ -1,5 +1,8 @@
 /wx-mcp
+/wx-mcp.exe
 /dist/
 /lib/*.dylib
+/lib/*.dll
+/*.dll
 *.log
 .DS_Store

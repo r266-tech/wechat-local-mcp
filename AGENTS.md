@@ -24,6 +24,21 @@ present; otherwise pick the newest versioned `wx-mcp-v*-darwin-arm64.zip`.
 ./install.sh --all --yes --json
 ```
 
+## Windows Fast Path
+
+On Windows, use the PowerShell installer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --all --yes --json
+```
+
+If WeChat data is in a custom location, set `WX_MCP_DB_ROOT` to the account
+directory that directly contains `db_storage`. With Windows WeChat logged in,
+wx-mcp scans `Weixin.exe` / `WeChat.exe` for SQLCipher raw-key literals,
+verifies them against the local DB files, and stores the schema-2 key map in
+`%USERPROFILE%\.config\wxcli\config.json`. Do not run macOS `wxkey bootstrap`
+on Windows.
+
 Treat `status=ready` and `status=warming_cache` as successful install states.
 `warming_cache` means cache preheating is running in the background; cache-backed
 tools still freshness-check before returning data.

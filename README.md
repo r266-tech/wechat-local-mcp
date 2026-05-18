@@ -36,6 +36,14 @@ Agent-first 入口:
 
 这个入口面向"把 GitHub 链接或 zip 丢给 agent"的场景: 安装/构建 binary, 复制 `libWCDB.dylib`, 注册 Claude/Codex MCP, 跑 `wxkey bootstrap`, 后台预热 cache, 并按需安装 launchd watcher. 所有结果都以 JSON 输出; agent 主要看 `status` / `blocked_by` / `next_action` / `errors[]` / `log`.
 
+Windows 入口:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --all --yes --json
+```
+
+Windows 版需要 `wx-mcp.exe` 旁边有 `libWCDB.dll` 或 `WCDB.dll`. 如果微信数据不在默认位置, 设置 `WX_MCP_DB_ROOT` 到直接包含 `db_storage` 的账号目录. Windows 微信保持登录时, wx-mcp 会扫描 `Weixin.exe` / `WeChat.exe` 进程内存里的 SQLCipher raw key, 验证后写入 schema-2 key map. 详细说明见 `docs/WINDOWS_USER_GUIDE.md`.
+
 > **首次安装只需要用户输一次 Mac admin 密码.** Agent 可以直接跑 `./install.sh --all --yes --json`; `wxkey bootstrap` 会弹出 wx-mcp 的隐藏密码输入框, 验证 sudo 后把密码存入用户 macOS Keychain. 之后所有运行 (cache refresh / wx-mcp 启动 / DB 解密 / 缺 key 自动补扫) 都复用这份 Keychain 凭据, 不要求用户进终端输入命令, 也不要求关闭 SIP.
 
 > **避免 TCC 反复弹 "wx-mcp 想访问其他 App 的数据" (macOS 15+).** 装完后, 进**系统设置 → 隐私与安全性 → 完全磁盘访问权限**, 点 `+` 把 `~/.local/share/wx-mcp/wx-mcp` 和 `~/.local/share/wx-mcp/wxkey` 加进去. 加完之后所有访问微信容器的请求都默默通过, 不再弹窗. (`--all` 默认**不**装 launchd watcher; 如果你确实需要后台 5 分钟一次自动刷新 cache, 加 `--watcher` 显式开, 但前提是先给上面两个 binary 加 Full Disk Access, 否则 watcher 每次跑都会触发弹窗.)

@@ -79,36 +79,28 @@ type server struct {
 	keyRefreshLast map[string]time.Time
 }
 
-// findWCDB locates libWCDB.dylib. Looks in this order:
-//  1. next to the wx-mcp binary (release archive layout: bin/wx-mcp + lib/dylib)
-//  2. ~/.config/wxcli/lib/ (shared install)
+// findWCDB locates the platform WCDB dynamic library.
 func findWCDB() (string, error) {
 	var candidates []string
+	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_LIB")); p != "" {
+		candidates = append(candidates, p)
+	}
 	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_DYLIB")); p != "" {
 		candidates = append(candidates, p)
 	}
-	if exe, err := os.Executable(); err == nil {
-		if exe, err = filepath.EvalSymlinks(exe); err == nil {
-			dir := filepath.Dir(exe)
-			candidates = append(candidates,
-				filepath.Join(dir, "libWCDB.dylib"),
-				filepath.Join(dir, "lib", "libWCDB.dylib"),
-				filepath.Join(dir, "..", "lib", "libWCDB.dylib"),
-				filepath.Join(dir, "lib", "WCDB.framework", "Versions", "2.1.15", "WCDB"),
-			)
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".config", "wxcli", "lib", "libWCDB.dylib"))
-	}
+	candidates = append(candidates, wcdbLibraryCandidates()...)
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WX_MCP_WCDB_DYLIB")
+	return "", errors.New(wcdbLibraryMissingMessage())
 }
 
+/*
+		return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WX_MCP_WCDB_DYLIB")
+	}
+*/
 func (s *server) ensure() error {
 	if s.ok {
 		return nil
@@ -147,6 +139,13 @@ func (s *server) ensure() error {
 }
 
 func (s *server) refreshKeysFromWxkey(reason string) error {
+	if !wxkey.SetupSupported() {
+		msg := wxkey.UnsupportedSetupMessage()
+		if msg == "" {
+			msg = "automatic key extraction is not supported on this platform"
+		}
+		return fmt.Errorf("%s Reason: %s", msg, reason)
+	}
 	const retryInterval = 30 * time.Second
 	key := keyRefreshReasonKey(reason)
 	if s.keyRefreshLast == nil {
