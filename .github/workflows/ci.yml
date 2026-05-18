@@ -46,3 +46,17 @@ jobs:
             $result | ConvertTo-Json -Depth 8
             exit 1
           }
+      - name: Windows installer dry-run smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Set-Content -LiteralPath .\libWCDB.dll -Value "" -NoNewline
+          try {
+            $result = .\install.ps1 -DryRun -All -Json | ConvertFrom-Json
+            if ($result.platform -ne "windows" -or $result.status -ne "dry_run" -or -not $result.dry_run) {
+              $result | ConvertTo-Json -Depth 8
+              exit 1
+            }
+          } finally {
+            Remove-Item -LiteralPath .\libWCDB.dll -Force -ErrorAction SilentlyContinue
+          }
