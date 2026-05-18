@@ -13,17 +13,19 @@ scope below is retained as historical design context.
 
 ## Goal
 
-Make `wx-mcp` usable on Windows when the user already has a valid schema-2 key
-map in `config.json` and a loadable Windows WCDB dynamic library.
+Make `wx-mcp` usable on Windows with a loadable Windows WCDB dynamic library and
+either an existing schema-2 key map or a logged-in Windows WeChat process that
+can be scanned for verified raw keys.
 
 The first Windows release must run the MCP server, CLI tools, cache refresh, and
-cache-backed queries on Windows. It must not promise automatic Windows WeChat key
-extraction.
+cache-backed queries on Windows. It also includes an in-process key adapter that
+does not print key material and only persists keys after DB verification.
 
 ## Non-goals
 
-- Do not implement Windows memory scanning, privilege escalation, or automatic
-  key extraction in this work.
+- Do not implement Windows privilege escalation or credential storage in this
+  work; key extraction is limited to scanning same-user logged-in WeChat
+  processes.
 - Do not change the macOS no-SIP `wxkey bootstrap` flow.
 - Do not weaken DB path containment or readonly protections.
 - Do not remove the release-zip macOS installer path.
@@ -57,12 +59,14 @@ On Windows, setup succeeds when all of these are true:
 - A Windows build of `wx-mcp.exe` is installed.
 - A compatible WCDB dynamic library is available as `libWCDB.dll`, `WCDB.dll`, or
   an explicit `WX_MCP_WCDB_LIB` / `WX_MCP_WCDB_DYLIB` path.
-- `config.json` contains `schema_version` 2 style `keys` and `db_root`.
+- `config.json` contains `db_root`; schema-version-2 `keys` may already exist or
+  may be written by the Windows key adapter.
 - `db_root` points to a WeChat account directory containing `db_storage`.
 
-If keys are missing, Windows returns a precise error:
+If keys are missing and scanning cannot verify any key, Windows returns a
+precise error:
 
-`Windows automatic key extraction is not implemented. Provide schema-2 keys in config.json or run the macOS wxkey bootstrap flow on a supported machine.`
+`no usable Windows WeChat raw keys found after scanning ...; ensure WX_MCP_DB_ROOT matches the logged-in account`
 
 ## Configuration And Paths
 
@@ -84,9 +88,13 @@ Behavior:
 - Add `WX_MCP_DB_ROOT` to bypass autodetection and set the account root.
 - On Windows, `DefaultWeChatBase` checks likely WeChat Files roots:
   - `%USERPROFILE%\Documents\WeChat Files`
+  - `%USERPROFILE%\Documents\WeChat Files\xwechat_files`
   - `%USERPROFILE%\WeChat Files`
+  - `%USERPROFILE%\WeChat Files\xwechat_files`
   - `%APPDATA%\Tencent\WeChat\WeChat Files`
+  - `%APPDATA%\Tencent\WeChat\WeChat Files\xwechat_files`
   - `%USERPROFILE%\AppData\Roaming\Tencent\WeChat\WeChat Files`
+  - `%USERPROFILE%\AppData\Roaming\Tencent\WeChat\WeChat Files\xwechat_files`
 - `AutoDetectDBRoot` keeps the existing safety rule: if multiple account
   directories have `db_storage`, refuse to guess and ask for `WX_MCP_DB_ROOT`.
 
@@ -125,9 +133,9 @@ Files:
 Behavior:
 
 - Darwin keeps the current `wxkey setup --quiet` fallback.
-- Windows does not attempt automatic setup by default.
-- Windows may locate `wxkey.exe` only for future compatibility, but if no ready
-  key map exists it returns the explicit unsupported-auto-key message.
+- Windows attempts automatic same-user setup by scanning `Weixin.exe` /
+  `WeChat.exe` for SQLCipher raw-key literals, then verifies each candidate key
+  against local DB files before writing schema-2 keys.
 - Existing schema-2 keys continue to work identically on both platforms.
 
 ## Background Cache Refresh
@@ -292,7 +300,8 @@ can use existing LIKE fallback only when explicitly requested.
 
 1. Add platform-aware config path and WeChat root detection.
 2. Add platform-aware WCDB library resolution.
-3. Split key refresh so Windows fails clearly when keys are missing.
+3. Split key refresh so Windows uses the in-process key adapter and fails
+   clearly when no verified keys are found.
 4. Replace background refresh shell script with Go-native spawn.
 5. Add `install.ps1` and update manifest/docs for Windows.
 6. Implement concurrent snapshot worker pool.
@@ -312,7 +321,9 @@ Windows runtime:
   - `wx-mcp.exe cache refresh`
   - `wx-mcp.exe sessions --limit 5`
   - `wx-mcp.exe search --keyword test --limit 5`
-- With missing keys, Windows returns the explicit unsupported-auto-key message.
+- With missing keys and a logged-in matching WeChat process, Windows verifies and
+  writes schema-2 keys; if scan fails, it returns an actionable mismatch/login
+  error.
 - `cache refresh --background` starts without `/bin/sh`.
 - `install.ps1 --all --yes --json` emits valid JSON in success and blocked
   states.
@@ -347,9 +358,8 @@ macOS regression:
 ## Self-review
 
 - No placeholder requirements remain.
-- Scope is intentionally limited to Windows query/runtime mode with existing
-  keys.
-- Windows automatic key extraction is explicitly out of scope.
+- Scope covers Windows query/runtime mode plus same-user automatic key scanning
+  for logged-in `Weixin.exe` / `WeChat.exe` processes.
 - The implementation order is file-backed and can be executed directly.
 - Acceptance criteria cover success, blocked states, performance, and macOS
   regression.

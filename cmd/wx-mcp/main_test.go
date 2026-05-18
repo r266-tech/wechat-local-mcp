@@ -215,6 +215,24 @@ func TestKeyRefreshReasonKeyUsesMissingSalt(t *testing.T) {
 	}
 }
 
+func TestRefreshReasonAlreadySatisfiedReloadsMissingSalt(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	salt := "0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(cfgPath, []byte(`{"wxid":"wxid_test","db_root":"`+dir+`","keys":{"`+salt+`":"enc"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WX_MCP_CONFIG", cfgPath)
+	srv := &server{}
+	reason := "no enc_key for salt " + salt + " in message/message_0.db"
+	if !srv.refreshReasonAlreadySatisfied(reason) {
+		t.Fatalf("missing salt should be satisfied after config reload")
+	}
+	if srv.cfg == nil || srv.cfg.Keys[salt] != "enc" || !srv.ok {
+		t.Fatalf("server config was not refreshed: %#v ok=%v", srv.cfg, srv.ok)
+	}
+}
+
 func TestCriticalCacheSourceClassification(t *testing.T) {
 	for _, rel := range []string{"contact/contact.db", "session/session.db", "message/message_0.db", "message/biz_message_1.db", "message/message_resource.db"} {
 		if !isCriticalCacheSource(rel) {

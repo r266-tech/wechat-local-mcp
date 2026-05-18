@@ -21,9 +21,10 @@
       "WeChat 4.x local data directory",
       "libWCDB.dylib/libWCDB.dll beside wx-mcp or configured with WX_MCP_WCDB_LIB",
       "schema-2 WeChat DB key map in ~/.config/wxcli/config.json",
-      "macOS can use wxkey bootstrap; Windows requires an existing schema-2 key map"
+      "macOS key setup uses wxkey bootstrap; Windows key setup scans a running Weixin.exe/WeChat.exe process and stores verified schema-2 keys"
     ],
-    "keyBootstrap": "./wxkey bootstrap"
+    "keyBootstrap": "./wxkey bootstrap",
+    "windowsKeySetup": ".\\wx-mcp.exe cache refresh --force"
   },
   "tools": {
     "primary": ["sessions", "resolve_chat", "messages", "media_resources", "search", "new_messages"],

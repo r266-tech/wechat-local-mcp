@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -76,6 +77,7 @@ type server struct {
 	cfg            *config.Config
 	wcdbPath       string
 	ok             bool
+	keyRefreshMu   sync.Mutex
 	keyRefreshLast map[string]time.Time
 }
 
@@ -139,6 +141,12 @@ func (s *server) ensure() error {
 }
 
 func (s *server) refreshKeysFromWxkey(reason string) error {
+	s.keyRefreshMu.Lock()
+	defer s.keyRefreshMu.Unlock()
+
+	if s.refreshReasonAlreadySatisfied(reason) {
+		return nil
+	}
 	if !wxkey.SetupSupported() {
 		msg := wxkey.UnsupportedSetupMessage()
 		if msg == "" {
@@ -155,10 +163,10 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 		return fmt.Errorf("%s; wxkey setup was already attempted recently for this condition", reason)
 	}
 	s.keyRefreshLast[key] = time.Now()
-	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running `wxkey setup` with stored sudo credential...\n", reason)
+	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running wxkey key setup...\n", reason)
 	res, stderr, err := wxkey.RunSetup()
 	if err != nil {
-		return fmt.Errorf("wxkey setup failed: %w\n%s\nRun `wxkey bootstrap` once to store the sudo credential and prepare the no-SIP key cache.", err, stderr)
+		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WX_MCP_DB_ROOT matches the logged-in account, then retry.", err, stderr)
 	}
 	fresh, err := config.Load()
 	if err != nil {
@@ -172,6 +180,25 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey setup OK — %d per-DB keys cached for wxid=%s\n",
 		len(res.Keys), res.WxID)
 	return nil
+}
+
+func (s *server) refreshReasonAlreadySatisfied(reason string) bool {
+	fresh, err := config.Load()
+	if err != nil || !fresh.Ready() {
+		return false
+	}
+	reasonKey := keyRefreshReasonKey(reason)
+	if strings.HasPrefix(reasonKey, "salt:") {
+		salt := strings.TrimPrefix(reasonKey, "salt:")
+		if _, ok := fresh.Keys[salt]; !ok {
+			return false
+		}
+	} else if reasonKey != "empty-schema2-key-map" {
+		return false
+	}
+	s.cfg = fresh
+	s.ok = true
+	return true
 }
 
 func keyRefreshReasonKey(reason string) string {

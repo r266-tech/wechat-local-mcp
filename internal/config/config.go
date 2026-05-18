@@ -177,6 +177,14 @@ func wxidFromAccountDir(path string) string {
 	return name
 }
 
+func withXWeChatFilesBase(path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	return []string{path, filepath.Join(path, "xwechat_files")}
+}
+
 func lastIndex(s, sep string) int {
 	for i := len(s) - len(sep); i >= 0; i-- {
 		if s[i:i+len(sep)] == sep {

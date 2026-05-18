@@ -14,19 +14,23 @@ func DefaultWeChatBases() ([]string, error) {
 	}
 	var bases []string
 	if documents := os.Getenv("USERPROFILE"); documents != "" {
-		bases = append(bases,
+		for _, root := range []string{
 			filepath.Join(documents, "Documents", "WeChat Files"),
 			filepath.Join(documents, "WeChat Files"),
 			filepath.Join(documents, "AppData", "Roaming", "Tencent", "WeChat", "WeChat Files"),
-		)
+		} {
+			bases = append(bases, withXWeChatFilesBase(root)...)
+		}
 	}
 	if appData := os.Getenv("APPDATA"); appData != "" {
-		bases = append(bases, filepath.Join(appData, "Tencent", "WeChat", "WeChat Files"))
+		bases = append(bases, withXWeChatFilesBase(filepath.Join(appData, "Tencent", "WeChat", "WeChat Files"))...)
 	}
-	bases = append(bases,
+	for _, root := range []string{
 		filepath.Join(h, "Documents", "WeChat Files"),
 		filepath.Join(h, "WeChat Files"),
-	)
+	} {
+		bases = append(bases, withXWeChatFilesBase(root)...)
+	}
 	return uniquePaths(bases), nil
 }
 

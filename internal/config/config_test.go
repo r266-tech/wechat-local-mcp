@@ -59,3 +59,17 @@ func TestAutoDetectDBRootUsesEnvOverride(t *testing.T) {
 		t.Fatalf("wxid = %q, want wxid_env", wxid)
 	}
 }
+
+func TestWithXWeChatFilesBase(t *testing.T) {
+	root := filepath.Join("Users", "v", "Documents", "WeChat Files")
+	got := withXWeChatFilesBase(root)
+	want := []string{root, filepath.Join(root, "xwechat_files")}
+	if len(got) != len(want) {
+		t.Fatalf("variants = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("variants[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

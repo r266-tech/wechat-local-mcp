@@ -1202,22 +1202,28 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	}
 	var rows []wcdb.Row
 	if mode == "fts" || mode == "auto" {
-		ftsWhere := append([]string{"message_fts MATCH ?"}, where...)
-		ftsArgs := append([]any{ftsPhrase(kw)}, args...)
-		ftsArgs = append(ftsArgs, limit)
-		rows, err = db.Query(fmt.Sprintf(`SELECT m.local_id, m.talker, m.talker_display_name, m.create_time,
-			m.sender_wxid, m.sender_display_name, m.base_kind, m.kind_name,
-			COALESCE(NULLIF(m.content_summary, ''), m.message_content) AS content,
-			c.type AS talker_contact_type, c.is_verified AS talker_is_verified
-			FROM message_fts f JOIN messages_unified m ON m.rowid = f.rowid
-			LEFT JOIN contacts_unified c ON c.username = m.talker
-			WHERE %s ORDER BY m.create_time DESC LIMIT ?`, strings.Join(ftsWhere, " AND ")), ftsArgs...)
-		if err != nil || mode == "fts" || len(rows) > 0 {
-			if err != nil {
-				return nil, false, err
+		if !cacheFTSReady(db) {
+			if mode == "fts" {
+				return nil, true, fmt.Errorf("cache FTS index is not ready (fts_ready=false); rebuild cache without WX_MCP_CACHE_SKIP_FTS or pass search_mode=like")
 			}
-			decorateMessageSearchRows(rows)
-			return rows, true, nil
+		} else {
+			ftsWhere := append([]string{"message_fts MATCH ?"}, where...)
+			ftsArgs := append([]any{ftsPhrase(kw)}, args...)
+			ftsArgs = append(ftsArgs, limit)
+			rows, err = db.Query(fmt.Sprintf(`SELECT m.local_id, m.talker, m.talker_display_name, m.create_time,
+				m.sender_wxid, m.sender_display_name, m.base_kind, m.kind_name,
+				COALESCE(NULLIF(m.content_summary, ''), m.message_content) AS content,
+				c.type AS talker_contact_type, c.is_verified AS talker_is_verified
+				FROM message_fts f JOIN messages_unified m ON m.rowid = f.rowid
+				LEFT JOIN contacts_unified c ON c.username = m.talker
+				WHERE %s ORDER BY m.create_time DESC LIMIT ?`, strings.Join(ftsWhere, " AND ")), ftsArgs...)
+			if err != nil || mode == "fts" || len(rows) > 0 {
+				if err != nil {
+					return nil, false, err
+				}
+				decorateMessageSearchRows(rows)
+				return rows, true, nil
+			}
 		}
 	}
 	if mode == "like" || mode == "auto" {
@@ -1241,6 +1247,17 @@ func (s *server) cacheSearch(a map[string]any) ([]wcdb.Row, bool, error) {
 	}
 	decorateMessageSearchRows(rows)
 	return rows, true, nil
+}
+
+func cacheFTSReady(db *wcdb.DB) bool {
+	if !tableExists(db, "message_fts") {
+		return false
+	}
+	rows, err := db.Query("SELECT value FROM cache_meta WHERE key='fts_ready'")
+	if err != nil || len(rows) == 0 {
+		return false
+	}
+	return strings.EqualFold(rowString(rows[0], "value"), "true")
 }
 
 func decorateMessageSearchRows(rows []wcdb.Row) {
