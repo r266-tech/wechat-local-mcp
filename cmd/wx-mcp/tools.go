@@ -106,7 +106,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "messages",
-		Description: "会话消息. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wx-mcp 自动解析. " +
+		Description: "会话消息, 默认直接读取实时微信消息 DB, 不缓存聊天正文. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wx-mcp 用 metadata cache 自动解析. " +
 			"fields=lite (默认) 返回: local_id / server_id / create_time / create_time_human / " +
 			"talker / talker_display_name / chat_type / sender_wxid / sender_display_name / is_from_me / base_kind / kind_name / content_summary " +
 			"(群聊已剥 'wxid:\\n' 前缀). " +
@@ -227,11 +227,11 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "search",
-		Description: "跨会话消息全文搜索. cache 存在时走 wx-mcp 自建 FTS, 支持 chat/talker/after/before/type/sender 过滤. " +
+		Description: "跨会话消息全文搜索, 默认直接读取微信 message_fts.db 和 Msg_<hash> 分片, 不缓存聊天正文. metadata cache 只用于 chat/sender 名称解析. " +
 			"字段: content (群聊已剥 'wxid:\\n' 前缀) / local_id / talker / talker_display_name / chat_type / " +
 			"create_time / sender_wxid / sender_display_name / base_kind / kind_name. " +
-			"sender + base_kind/kind_name 来自 join 回 Msg_<hash>(talker), 部分命中可能因 shard 路由失败缺这几字段. " +
-			"search_mode=fts 默认只走自建 FTS; like 显式做慢速模糊 LIKE; auto 先 FTS 无结果再 LIKE. FTS 索引可能落后实时几分钟.",
+			"sender + base_kind/kind_name 来自 join 回所有包含 Msg_<hash>(talker) 的 message shard. " +
+			"search_mode=fts/like/auto 保留兼容; 三种模式都使用微信 live FTS, 不做全局 LIKE 扫描.",
 		InputSchema: jsonSchema(props{
 			"keyword":     strProp("搜索关键词"),
 			"talker":      strProp("可选: 限定 wxid 或 xxx@chatroom"),
@@ -242,7 +242,7 @@ var toolDefs = []toolDef{
 			"kind_name":   strProp("可选: 同 type"),
 			"base_kind":   intProp("可选: base_kind raw int"),
 			"sender":      strProp("可选: sender wxid 或昵称"),
-			"search_mode": enumStrProp("fts (默认) / like / auto", "fts", "like", "auto"),
+			"search_mode": enumStrProp("兼容参数: fts (默认) / like / auto; 当前都走微信 live FTS", "fts", "like", "auto"),
 			"limit":       intProp("返回条数 (默认 20)"),
 		}, []string{"keyword"}),
 	},
@@ -264,7 +264,7 @@ var toolDefs = []toolDef{
 			"payer_wxid / payer_display_name / receiver_wxid / receiver_display_name / pay_sub_type (raw int) / " +
 			"begin_transfer_time / invalid_time / last_modified_time / message_server_id / " +
 			"amount (从 messages join 出, 如 '￥5.00') / description (人类可读, 如 '收到转账5.00元') / memo (转账留言, omitempty). " +
-			"amount/description/memo 通过 message_server_id 路由到 Msg_<hash>(session_username) 拉 XML 提取, 路由失败缺. " +
+			"amount/description/memo 通过 message_server_id 从所有匹配 Msg_<hash>(session_username) 的 shard 拉 XML 提取. " +
 			"after/before 按 begin_transfer_time 过滤, 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
 			"limit":  intProp("返回条数 (默认 50)"),
@@ -278,7 +278,7 @@ var toolDefs = []toolDef{
 			"session_username / session_display_name / native_url (微信红包深链) / message_server_id / " +
 			"wishing (祝福语 如 '恭喜发财大吉大利', 从 join XML 提取) / scene_text (如 '微信红包', omitempty). " +
 			"红包金额随机, 仅领取后可见, 不在本地数据中. " +
-			"不传 after/before 时按 rowid DESC (近似收到顺序); 传时间/sender/chat 过滤时使用 cache index join messages.create_time.",
+			"不传 after/before 时按 rowid DESC (近似收到顺序); 传时间过滤时 live join 对应 Msg_<hash> 取 create_time.",
 		InputSchema: jsonSchema(props{
 			"limit":  intProp("返回条数 (默认 50)"),
 			"talker": strProp("可选: 限定会话对象"),
@@ -336,13 +336,12 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "cache_status",
-		Description: "查看 wx-mcp 明文 snapshot cache 与统一 index.sqlite 状态. 不触发 wxkey setup.",
+		Description: "查看 wx-mcp metadata snapshot cache 与统一 index.sqlite 诊断信息. 默认只缓存联系人/会话用于名称解析, 不缓存聊天正文, 不触发 wxkey setup; 不再输出 fresh=true 这种易误解的全局新鲜度结论.",
 		InputSchema: jsonSchema(props{}, nil),
 	},
 	{
 		Name: "cache_refresh",
-		Description: "刷新明文 DB snapshot cache 并重建统一 index.sqlite. " +
-			"默认按 DB/WAL mtime 复用未变化 snapshot; force=true 强制重解所有可读 DB. " +
+		Description: "刷新 metadata snapshot cache 并重建统一 index.sqlite. 默认只 snapshot contact/contact.db 和 session/session.db; 聊天正文现查. " +
 			"background=true 立即返回并在后台刷新, 避免 MCP 调用超时.",
 		InputSchema: jsonSchema(props{
 			"force":      boolProp("强制重建所有 plaintext snapshots"),
@@ -351,12 +350,12 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "cache_rebuild",
-		Description: "删除当前 wx-mcp cache 目录后完整重建 snapshot cache + index.sqlite.",
+		Description: "删除当前 wx-mcp cache 目录后完整重建 metadata snapshot cache + index.sqlite.",
 		InputSchema: jsonSchema(props{}, nil),
 	},
 	{
 		Name:        "unread",
-		Description: "未读会话列表. cache-first; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
+		Description: "未读会话列表. metadata cache-backed; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
 			"type_filter": strProp("all/private/group/official_account/folded/bot, 可逗号分隔"),
@@ -364,38 +363,14 @@ var toolDefs = []toolDef{
 		}, nil),
 	},
 	{
-		Name: "new_messages",
-		Description: "从 cache index 增量拉新消息. cursor 使用上次返回的 next_cursor; " +
-			"也可用 after 指定 unix秒/日期. 返回 messages + next_cursor.",
-		InputSchema: jsonSchema(props{
-			"talker": strProp("可选: 限定会话对象"),
-			"chat":   strProp("可选: 限定昵称/备注/群名, 自动解析为 talker"),
-			"after":  strProp("可选: 起始时间 (unix秒 或 2006-01-02)"),
-			"cursor": strProp("可选: 上次返回的 next_cursor"),
-			"limit":  intProp("返回条数 (默认 100, 最大 1000)"),
-			"fields": enumStrProp("lite (默认) / full", "lite", "full"),
-		}, nil),
-	},
-	{
-		Name: "stats",
-		Description: "基于 cache index 的统计. 不传 chat/talker 返回全局 top talkers/senders/kinds/daily; " +
-			"传 chat/talker 返回单会话 by_sender/by_kind/daily/hourly. 支持 after/before.",
-		InputSchema: jsonSchema(props{
-			"chat":      strProp("可选: 昵称/备注/群名"),
-			"talker":    strProp("可选: wxid 或 xxx@chatroom"),
-			"after":     strProp("可选: 起始时间"),
-			"before":    strProp("可选: 截止时间"),
-			"kind_name": strProp("可选: kind_name 过滤"),
-			"type":      strProp("可选: 同 kind_name"),
-			"base_kind": intProp("可选: base_kind raw int"),
-			"sender":    strProp("可选: sender wxid 或昵称"),
-			"limit":     intProp("每组统计返回条数 (默认 10)"),
-		}, nil),
+		Name:        "stats",
+		Description: "metadata cache 状态统计. wx-mcp 不缓存聊天正文, 因此只返回 sessions/contacts 计数和提示.",
+		InputSchema: jsonSchema(props{}, nil),
 	},
 	{
 		Name: "export_messages",
-		Description: "从 cache index 导出消息到本地文件. format=jsonl/markdown/html. " +
-			"支持 talker/after/before/keyword/limit 过滤.",
+		Description: "导出单个 chat/talker 的消息到本地文件, 直接读取实时消息 DB; 不支持全局无关键词导出. " +
+			"format=jsonl/markdown/html, 支持 after/before/keyword/limit 过滤.",
 		InputSchema: jsonSchema(props{
 			"path":      strProp("输出文件绝对路径"),
 			"format":    enumStrProp("jsonl (默认) / markdown / html", "jsonl", "markdown", "html"),

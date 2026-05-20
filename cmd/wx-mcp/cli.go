@@ -65,17 +65,10 @@ func maybeRunCLI(args []string) bool {
 		runToolCLI("group_members", flags)
 		return true
 	case "stats":
-		flags := parseKVFlags(args[1:])
-		if chat := firstPositional(args[1:]); chat != "" && flags["talker"] == nil && flags["chat"] == nil {
-			flags["chat"] = chat
-		}
-		runToolCLI("stats", flags)
+		runToolCLI("stats", parseKVFlags(args[1:]))
 		return true
 	case "unread":
 		runToolCLI("unread", parseKVFlags(args[1:]))
-		return true
-	case "new-messages", "new_messages":
-		runToolCLI("new_messages", parseKVFlags(args[1:]))
 		return true
 	case "export", "export-messages", "export_messages":
 		flags := parseKVFlags(args[1:])
@@ -154,8 +147,6 @@ func runToolCLI(name string, flags map[string]any) {
 		result, err = srv.toolStats(flags)
 	case "unread":
 		result, err = srv.toolUnread(flags)
-	case "new_messages":
-		result, err = srv.toolNewMessages(flags)
 	case "export_messages":
 		result, err = srv.toolExportMessages(flags)
 	case "search":
@@ -268,8 +259,7 @@ Query/export CLI:
   wx-mcp contacts [--keyword 李]
   wx-mcp members "某群"
   wx-mcp unread [--limit 50]
-  wx-mcp new-messages [--after 2026-05-11] [--talker wxid_x] [--limit 100]
-  wx-mcp stats ["张三"] [--limit 10]
+  wx-mcp stats
   wx-mcp favorites [--limit 20]
   wx-mcp red-packets [--limit 20]
   wx-mcp transfers [--limit 20]

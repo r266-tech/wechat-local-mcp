@@ -158,6 +158,38 @@ func TestLiteMessagesKeepsAgentContext(t *testing.T) {
 	}
 }
 
+func TestSortLiveMessageRowsAcrossShards(t *testing.T) {
+	rows := []wcdb.Row{
+		{"local_id": int64(1), "sort_seq": int64(100), "create_time": int64(30)},
+		{"local_id": int64(3), "sort_seq": int64(300), "create_time": int64(10)},
+		{"local_id": int64(2), "sort_seq": int64(200), "create_time": int64(20)},
+	}
+	sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC")
+	if got := []int64{rowInt64(rows[0], "local_id"), rowInt64(rows[1], "local_id"), rowInt64(rows[2], "local_id")}; got[0] != 3 || got[1] != 2 || got[2] != 1 {
+		t.Fatalf("sort_seq desc order = %v, want [3 2 1]", got)
+	}
+	sortLiveMessageRows(rows, "create_time ASC, local_id ASC")
+	if got := []int64{rowInt64(rows[0], "local_id"), rowInt64(rows[1], "local_id"), rowInt64(rows[2], "local_id")}; got[0] != 3 || got[1] != 2 || got[2] != 1 {
+		t.Fatalf("create_time asc order = %v, want [3 2 1]", got)
+	}
+}
+
+func TestSliceRowsAppliesGlobalOffsetAndLimit(t *testing.T) {
+	rows := []wcdb.Row{
+		{"local_id": int64(1)},
+		{"local_id": int64(2)},
+		{"local_id": int64(3)},
+		{"local_id": int64(4)},
+	}
+	got := sliceRows(rows, 1, 2)
+	if len(got) != 2 || rowInt64(got[0], "local_id") != 2 || rowInt64(got[1], "local_id") != 3 {
+		t.Fatalf("sliceRows offset/limit = %#v, want local_id [2 3]", got)
+	}
+	if got := sliceRows(rows, 10, 2); got != nil {
+		t.Fatalf("sliceRows past end = %#v, want nil", got)
+	}
+}
+
 func TestValidateToolArgsRejectsBadInteger(t *testing.T) {
 	if err := validateToolArgs("sessions", map[string]any{"limit": "bad"}); err == nil {
 		t.Fatalf("validateToolArgs should reject string limit")
@@ -243,12 +275,12 @@ func TestRefreshReasonAlreadySatisfiedReloadsMissingSalt(t *testing.T) {
 }
 
 func TestCriticalCacheSourceClassification(t *testing.T) {
-	for _, rel := range []string{"contact/contact.db", "session/session.db", "message/message_0.db", "message/biz_message_1.db", "message/message_resource.db"} {
+	for _, rel := range []string{"contact/contact.db", "session/session.db"} {
 		if !isCriticalCacheSource(rel) {
 			t.Fatalf("%s should be critical", rel)
 		}
 	}
-	for _, rel := range []string{"message/message_fts.db", "migrate/unspportmsg.db", "favorite/favorite.db"} {
+	for _, rel := range []string{"message/message_0.db", "message/biz_message_1.db", "message/message_resource.db", "message/message_fts.db", "migrate/unspportmsg.db", "favorite/favorite.db"} {
 		if isCriticalCacheSource(rel) {
 			t.Fatalf("%s should not be critical", rel)
 		}
@@ -271,24 +303,6 @@ func TestParseKVFlagsPreservesStringIDs(t *testing.T) {
 	}
 	if got, ok := flags["limit"].(int64); !ok || got != 1 {
 		t.Fatalf("limit = %#v, want int64(1)", flags["limit"])
-	}
-}
-
-func TestCacheCursorRoundTrip(t *testing.T) {
-	cursor := makeCacheCursor(1776330000, "room:colon@chatroom", 42)
-	got, err := parseCacheCursor(cursor)
-	if err != nil {
-		t.Fatalf("parseCacheCursor returned error: %v", err)
-	}
-	if got.CreateTime != 1776330000 || got.Talker != "room:colon@chatroom" || got.LocalID != 42 || got.LegacyRowID != 0 {
-		t.Fatalf("parseCacheCursor = %#v", got)
-	}
-	legacy, err := parseCacheCursor("1776330000:99")
-	if err != nil {
-		t.Fatalf("legacy parseCacheCursor returned error: %v", err)
-	}
-	if legacy.CreateTime != 1776330000 || legacy.LegacyRowID != 99 {
-		t.Fatalf("legacy parseCacheCursor = %#v", legacy)
 	}
 }
 

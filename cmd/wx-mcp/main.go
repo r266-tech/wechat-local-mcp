@@ -288,7 +288,23 @@ func (s *server) validatedDBPath(subdir, file string) (string, error) {
 // WCDB grows new files as data scales — so glob instead of hardcoding 0..4.
 var msgShardRE = regexp.MustCompile(`^(message|biz_message)_\d+\.db$`)
 
+type msgShardDB struct {
+	Name string
+	DB   *wcdb.DB
+}
+
 func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
+	shards, err := s.findMsgDBs(tableName)
+	if err != nil {
+		return nil, err
+	}
+	for i := 1; i < len(shards); i++ {
+		shards[i].DB.Close()
+	}
+	return shards[0].DB, nil
+}
+
+func (s *server) findMsgDBs(tableName string) ([]msgShardDB, error) {
 	if err := s.ensure(); err != nil {
 		return nil, err
 	}
@@ -304,6 +320,7 @@ func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
 		}
 	}
 	var openErrs []error
+	var found []msgShardDB
 	for _, name := range shards {
 		db, err := s.openDB("message", name)
 		if err != nil {
@@ -312,14 +329,24 @@ func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
 		}
 		rows, err := db.Query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", tableName)
 		if err == nil && len(rows) > 0 {
-			return db, nil
+			found = append(found, msgShardDB{Name: name, DB: db})
+			continue
 		}
 		db.Close()
+	}
+	if len(found) > 0 {
+		return found, nil
 	}
 	if len(openErrs) > 0 {
 		return nil, fmt.Errorf("table %s not found in opened message shards; %d/%d shards could not be opened, first error: %v", tableName, len(openErrs), len(shards), openErrs[0])
 	}
 	return nil, fmt.Errorf("table %s not found in %d message shards", tableName, len(shards))
+}
+
+func closeMsgDBs(shards []msgShardDB) {
+	for _, shard := range shards {
+		shard.DB.Close()
+	}
 }
 
 // ──────────────────── main loop ────────────────────
@@ -360,7 +387,7 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.4.5"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.5.1"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
 				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +
@@ -403,7 +430,6 @@ func (s *server) callTool(p toolCallParams) toolResult {
 		"cache_refresh":          s.toolCacheRefresh,
 		"cache_rebuild":          s.toolCacheRebuild,
 		"unread":                 s.toolUnread,
-		"new_messages":           s.toolNewMessages,
 		"stats":                  s.toolStats,
 		"export_messages":        s.toolExportMessages,
 	}
@@ -588,35 +614,46 @@ func (s *server) toolContacts(a map[string]any) (any, error) {
 }
 
 func (s *server) toolMessages(a map[string]any) (any, error) {
-	if rows, ok, err := s.cacheMessages(a); ok || err != nil {
-		return rows, err
+	rows, err := s.queryLiveMessages(a, "sort_seq DESC, local_id DESC")
+	if err != nil {
+		return nil, err
 	}
-	talker := getStr(a, "talker")
-	if talker == "" {
-		talker = getStr(a, "chat")
+	mode, err := fieldsMode(a)
+	if err != nil {
+		return nil, err
+	}
+	return liteMessages(rows, mode), nil
+}
+
+func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, error) {
+	talker, err := s.resolveLooseChatArg(a)
+	if err != nil {
+		return nil, err
 	}
 	if talker == "" {
 		return nil, fmt.Errorf("talker or chat is required")
-	}
-	if getStr(a, "talker") == "" && !looksLikeRawChatID(talker) {
-		return nil, fmt.Errorf("chat %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw talker/wxid", talker)
-	}
-	if messagesHasCacheOnlyFilters(a) {
-		return nil, fmt.Errorf("messages filters type/kind_name/base_kind/sender require cache index; run `wx-mcp cache refresh` first")
 	}
 	if aggregatorSessions[talker] {
 		return nil, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
 	}
 	tableName := "Msg_" + talkerHash(talker)
-	db, err := s.findMsgDB(tableName)
+	shards, err := s.findMsgDBs(tableName)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer closeMsgDBs(shards)
+
+	sender := ""
+	if senderArg := getStr(a, "sender"); senderArg != "" {
+		resolved, err := s.resolveLooseSenderArg(a)
+		if err != nil {
+			return nil, err
+		}
+		sender = resolved
+	}
 
 	var where []string
 	var args []any
-
 	if s := getStr(a, "after"); s != "" {
 		ts, err := parseTS(s)
 		if err != nil {
@@ -633,51 +670,86 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 		where = append(where, "create_time < ?")
 		args = append(args, ts)
 	}
-	wc := ""
-	if len(where) > 0 {
-		wc = "WHERE " + strings.Join(where, " AND ")
+	if baseKind := getInt(a, "base_kind", 0); baseKind != 0 {
+		where = append(where, "(local_type & 4294967295) = ?")
+		args = append(args, baseKind)
+	}
+	if kind := firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type")); kind != "" {
+		kwc, kargs, err := messageKindWhere(kind, "local_type")
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, kwc)
+		args = append(args, kargs...)
+	}
+	if order == "" {
+		order = "sort_seq DESC, local_id DESC"
 	}
 	limit := getInt(a, "limit", 50)
 	offset := getInt(a, "offset", 0)
 	kw := getStr(a, "keyword")
-
-	// keyword 不能进 SQL WHERE — message_content 是 zstd 压缩 BLOB, LIKE
-	// 在压缩字节上 match 不了任何文本. 改在 enrich 解压后 in-memory filter.
-	// 拉宽 SQL 取数, offset 也在 Go 里应用 (避免 SQL offset 跳过未命中行).
-	sqlLimit := limit
-	sqlOffset := offset
+	sqlLimit := limit + offset
+	if sqlLimit <= 0 {
+		sqlLimit = limit
+	}
 	if kw != "" {
 		sqlLimit = 5000
-		sqlOffset = 0
 	}
-	args = append(args, sqlLimit, sqlOffset)
 
-	rows, err := db.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
-		real_sender_id, create_time, status, message_content, source
-		FROM %s %s
-		ORDER BY sort_seq DESC
-		LIMIT ? OFFSET ?`, tableName, wc), args...)
-	if err != nil {
-		return nil, err
-	}
-	if m, _ := loadName2Id(db); m != nil {
-		rows = resolveSenders(rows, m)
-	}
-	rows = enrichMessages(decodeFields(rows, "message_content", "source"))
-	s.attachDisplayNames(rows, [2]string{"sender_wxid", "sender_display_name"})
-	if selfWxid := s.selfWxid(); selfWxid != "" {
-		for _, r := range rows {
-			sw, _ := r["sender_wxid"].(string)
-			r["is_from_me"] = (sw == selfWxid)
+	var rows []wcdb.Row
+	senderSeen := sender == ""
+	for _, shard := range shards {
+		shardWhere := append([]string(nil), where...)
+		shardArgs := append([]any(nil), args...)
+		n2i, _ := loadName2Id(shard.DB)
+		if sender != "" {
+			var senderID int64
+			found := false
+			for id, wxid := range n2i {
+				if wxid == sender {
+					senderID = id
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+			senderSeen = true
+			shardWhere = append(shardWhere, "real_sender_id = ?")
+			shardArgs = append(shardArgs, senderID)
 		}
+		shardWC := ""
+		if len(shardWhere) > 0 {
+			shardWC = "WHERE " + strings.Join(shardWhere, " AND ")
+		}
+		shardArgs = append(shardArgs, sqlLimit, 0)
+		shardRows, err := shard.DB.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
+			real_sender_id, create_time, status, message_content, source
+			FROM %s %s
+			ORDER BY %s
+			LIMIT ? OFFSET ?`, quoteIdent(tableName), shardWC, order), shardArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", shard.Name, err)
+		}
+		if n2i != nil {
+			shardRows = resolveSenders(shardRows, n2i)
+		}
+		shardRows = enrichMessages(decodeFields(shardRows, "message_content", "source"))
+		for _, r := range shardRows {
+			r["talker"] = talker
+			r["chat_type"] = agentChatType(talker, wxkind.ClassifyUsername(talker), false)
+			baseKind, subtype, kindName := wxkind.Unpack(rowInt64(r, "local_type"))
+			r["base_kind"] = baseKind
+			r["subtype"] = subtype
+			r["kind_name"] = kindName
+		}
+		rows = append(rows, shardRows...)
 	}
-	for _, r := range rows {
-		delete(r, "real_sender_id")
-		delete(r, "sort_seq")
-		delete(r, "status")
-		delete(r, "source")
-		delete(r, "local_type")
+	if !senderSeen {
+		return []wcdb.Row{}, nil
 	}
+	sortLiveMessageRows(rows, order)
 	if kw != "" {
 		filtered := rows[:0]
 		for _, r := range rows {
@@ -696,24 +768,69 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 			filtered = filtered[:limit]
 		}
 		rows = filtered
+	} else {
+		rows = sliceRows(rows, offset, limit)
 	}
-	mode := getStr(a, "fields")
-	if mode == "" {
-		mode = "lite"
-	}
-	if mode != "lite" && mode != "full" {
-		return nil, fmt.Errorf("invalid fields=%q: must be \"lite\" or \"full\"", mode)
-	}
-	return liteMessages(rows, mode), nil
-}
-
-func messagesHasCacheOnlyFilters(a map[string]any) bool {
-	for _, k := range []string{"type", "kind_name", "sender"} {
-		if getStr(a, k) != "" {
-			return true
+	s.attachDisplayNames(rows,
+		[2]string{"talker", "talker_display_name"},
+		[2]string{"sender_wxid", "sender_display_name"})
+	if selfWxid := s.selfWxid(); selfWxid != "" {
+		for _, r := range rows {
+			sw, _ := r["sender_wxid"].(string)
+			r["is_from_me"] = (sw == selfWxid)
 		}
 	}
-	return getInt(a, "base_kind", 0) != 0
+	for _, r := range rows {
+		delete(r, "real_sender_id")
+		delete(r, "sort_seq")
+		delete(r, "status")
+		delete(r, "source")
+		delete(r, "local_type")
+	}
+	return rows, nil
+}
+
+func sortLiveMessageRows(rows []wcdb.Row, order string) {
+	lower := strings.ToLower(order)
+	primary := "sort_seq"
+	primaryAsc := false
+	if strings.Contains(lower, "create_time") {
+		primary = "create_time"
+		primaryAsc = strings.Contains(lower, "create_time asc")
+	} else if strings.Contains(lower, "sort_seq asc") {
+		primaryAsc = true
+	}
+	localAsc := strings.Contains(lower, "local_id asc")
+	sort.SliceStable(rows, func(i, j int) bool {
+		li := rowInt64(rows[i], primary)
+		lj := rowInt64(rows[j], primary)
+		if li != lj {
+			if primaryAsc {
+				return li < lj
+			}
+			return li > lj
+		}
+		ii := rowInt64(rows[i], "local_id")
+		ij := rowInt64(rows[j], "local_id")
+		if localAsc {
+			return ii < ij
+		}
+		return ii > ij
+	})
+}
+
+func sliceRows(rows []wcdb.Row, offset, limit int) []wcdb.Row {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(rows) {
+		return nil
+	}
+	rows = rows[offset:]
+	if limit >= 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
 }
 
 // liteMessages strips raw XML / parsed / source / housekeeping fields when
@@ -1052,6 +1169,55 @@ func mediaKindWhere(kind, alias string) (string, []any, error) {
 	}
 }
 
+func messageKindWhere(kind, col string) (string, []any, error) {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "text":
+		return "(" + col + " & 4294967295) = ?", []any{int64(1)}, nil
+	case "image":
+		return "(" + col + " & 4294967295) = ?", []any{int64(3)}, nil
+	case "voice":
+		return "(" + col + " & 4294967295) = ?", []any{int64(34)}, nil
+	case "card":
+		return "(" + col + " & 4294967295) = ?", []any{int64(42)}, nil
+	case "video":
+		return "(" + col + " & 4294967295) = ?", []any{int64(43)}, nil
+	case "sticker", "emoji":
+		return "(" + col + " & 4294967295) = ?", []any{int64(47)}, nil
+	case "location":
+		return "(" + col + " & 4294967295) = ?", []any{int64(48)}, nil
+	case "app":
+		return "(" + col + " & 4294967295) = ?", []any{int64(49)}, nil
+	case "voip":
+		return "(" + col + " & 4294967295) = ?", []any{int64(50)}, nil
+	case "system":
+		return "(" + col + " & 4294967295) = ?", []any{int64(10000)}, nil
+	case "music":
+		return col + " = ?", []any{packedLocalType(49, 3)}, nil
+	case "link":
+		return col + " IN (?, ?)", []any{packedLocalType(49, 5), packedLocalType(49, 49)}, nil
+	case "file":
+		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8), packedLocalType(49, 24)}, nil
+	case "forward_chat":
+		return col + " = ?", []any{packedLocalType(49, 19)}, nil
+	case "miniprogram":
+		return col + " IN (?, ?)", []any{packedLocalType(49, 33), packedLocalType(49, 36)}, nil
+	case "channel_video":
+		return col + " = ?", []any{packedLocalType(49, 51)}, nil
+	case "quote":
+		return col + " = ?", []any{packedLocalType(49, 57)}, nil
+	case "pat":
+		return col + " = ?", []any{packedLocalType(49, 62)}, nil
+	case "announcement":
+		return col + " = ?", []any{packedLocalType(49, 87)}, nil
+	case "transfer":
+		return col + " = ?", []any{packedLocalType(49, 2000)}, nil
+	case "red_packet":
+		return col + " = ?", []any{packedLocalType(49, 2001)}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported message kind_name/type %q", kind)
+	}
+}
+
 func packedLocalType(baseKind, subtype int32) int64 {
 	return int64(uint32(baseKind)) | (int64(subtype) << 32)
 }
@@ -1321,26 +1487,28 @@ func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 		return rows, nil
 	}
 	tableName := "Msg_" + talkerHash(target)
-	msgDB, err := s.findMsgDB(tableName)
+	shards, err := s.findMsgDBs(tableName)
 	if err != nil {
 		return nil, fmt.Errorf("stats=true 失败 (%s): %w", tableName, err)
 	}
-	defer msgDB.Close()
-	n2i, err := loadName2Id(msgDB)
-	if err != nil {
-		return nil, fmt.Errorf("stats=true 失败 (loadName2Id): %w", err)
-	}
-	countRows, err := msgDB.Query(fmt.Sprintf(
-		"SELECT real_sender_id, COUNT(*) AS cnt FROM %s GROUP BY real_sender_id", tableName))
-	if err != nil {
-		return nil, fmt.Errorf("stats=true 失败 (count query): %w", err)
-	}
+	defer closeMsgDBs(shards)
 	counts := make(map[string]int64)
-	for _, r := range countRows {
-		id, _ := r["real_sender_id"].(int64)
-		cnt, _ := r["cnt"].(int64)
-		if w, ok := n2i[id]; ok {
-			counts[w] = cnt
+	for _, shard := range shards {
+		n2i, err := loadName2Id(shard.DB)
+		if err != nil {
+			return nil, fmt.Errorf("stats=true 失败 (%s loadName2Id): %w", shard.Name, err)
+		}
+		countRows, err := shard.DB.Query(fmt.Sprintf(
+			"SELECT real_sender_id, COUNT(*) AS cnt FROM %s GROUP BY real_sender_id", tableName))
+		if err != nil {
+			return nil, fmt.Errorf("stats=true 失败 (%s count query): %w", shard.Name, err)
+		}
+		for _, r := range countRows {
+			id, _ := r["real_sender_id"].(int64)
+			cnt, _ := r["cnt"].(int64)
+			if w, ok := n2i[id]; ok {
+				counts[w] += cnt
+			}
 		}
 	}
 	for _, row := range rows {
@@ -1559,24 +1727,32 @@ func (s *server) loadSnsFeedPreview(db *wcdb.DB, ids map[int64]bool) map[int64]*
 }
 
 func (s *server) toolSearch(a map[string]any) (any, error) {
-	if rows, ok, err := s.cacheSearch(a); ok || err != nil {
-		return rows, err
-	}
 	kw := getStr(a, "keyword")
 	if kw == "" {
 		return nil, fmt.Errorf("keyword is required")
 	}
-	mode := searchMode(a)
-	if mode == "fts" {
-		return nil, fmt.Errorf("search_mode=fts requires cache index; run `wx-mcp cache refresh` first or pass search_mode=like for legacy direct search")
+	switch mode := searchMode(a); mode {
+	case "fts", "like", "auto":
+	default:
+		return nil, fmt.Errorf("invalid search_mode=%q: must be fts / like / auto", mode)
 	}
-	if searchHasCacheOnlyFilters(a) {
-		return nil, fmt.Errorf("search filters chat/talker/after/before/type/kind_name/base_kind/sender require cache index; run `wx-mcp cache refresh` first")
+	talker, err := s.resolveLooseChatArg(a)
+	if err != nil {
+		return nil, err
+	}
+	sender := ""
+	if getStr(a, "sender") != "" {
+		sender, err = s.resolveLooseSenderArg(a)
+		if err != nil {
+			return nil, err
+		}
 	}
 	limit := getInt(a, "limit", 20)
 	like := "%" + kw + "%"
 
-	// Use FTS content tables (85万条索引, single DB) — much faster than scanning Msg_* tables.
+	// search_mode is kept for compatibility, but all modes use WeChat's live
+	// FTS content DB. wx-mcp intentionally does not globally scan every Msg_*
+	// table for substring search.
 	db, err := s.openDB("message", "message_fts.db")
 	if err != nil {
 		return nil, err
@@ -1589,11 +1765,54 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		return nil, fmt.Errorf("search 失败 (name2id): %w", err)
 	}
 	idToTalker := make(map[int64]string)
+	talkerToID := make(map[string]int64)
 	for _, r := range n2iRows {
 		if rid, ok := r["rid"].(int64); ok {
 			if u, ok := r["username"].(string); ok {
 				idToTalker[rid] = u
+				talkerToID[u] = rid
 			}
+		}
+	}
+	var sessionID int64
+	if talker != "" {
+		var ok bool
+		sessionID, ok = talkerToID[talker]
+		if !ok {
+			return []wcdb.Row{}, nil
+		}
+	}
+	subWhere := []string{"c0 LIKE ?"}
+	subArgs := []any{like}
+	if sessionID != 0 {
+		subWhere = append(subWhere, "c4 = ?")
+		subArgs = append(subArgs, sessionID)
+	}
+	if s := getStr(a, "after"); s != "" {
+		ts, err := parseTS(s)
+		if err != nil {
+			return nil, err
+		}
+		subWhere = append(subWhere, "c6 >= ?")
+		subArgs = append(subArgs, ts)
+	}
+	if s := getStr(a, "before"); s != "" {
+		ts, err := parseTS(s)
+		if err != nil {
+			return nil, err
+		}
+		subWhere = append(subWhere, "c6 < ?")
+		subArgs = append(subArgs, ts)
+	}
+	whereSQL := strings.Join(subWhere, " AND ")
+	fetchLimit := limit
+	if searchNeedsPostFilter(a) {
+		fetchLimit = limit * 20
+		if fetchLimit < 200 {
+			fetchLimit = 200
+		}
+		if fetchLimit > 5000 {
+			fetchLimit = 5000
 		}
 	}
 
@@ -1602,15 +1821,20 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 	// which could miss newer messages living in later partitions.
 	// c0=text, c1=local_id, c2=sort_seq, c4=session_id, c6=create_time
 	query := `SELECT * FROM (
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_0_content WHERE c0 LIKE ?
+		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_0_content WHERE ` + whereSQL + `
 		UNION ALL
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_1_content WHERE c0 LIKE ?
+		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_1_content WHERE ` + whereSQL + `
 		UNION ALL
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_2_content WHERE c0 LIKE ?
+		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_2_content WHERE ` + whereSQL + `
 		UNION ALL
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_3_content WHERE c0 LIKE ?
+		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_3_content WHERE ` + whereSQL + `
 	) ORDER BY create_time DESC LIMIT ?`
-	rows, err := db.Query(query, like, like, like, like, limit)
+	var qargs []any
+	for i := 0; i < 4; i++ {
+		qargs = append(qargs, subArgs...)
+	}
+	qargs = append(qargs, fetchLimit)
+	rows, err := db.Query(query, qargs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1624,6 +1848,10 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		[2]string{"talker", "talker_display_name"},
 		[2]string{"sender_wxid", "sender_display_name"})
 	decorateMessageSearchRows(rows)
+	rows = filterLiveSearchRows(rows, a, sender)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
 	return rows, nil
 }
 
@@ -1635,13 +1863,61 @@ func searchMode(a map[string]any) string {
 	return mode
 }
 
-func searchHasCacheOnlyFilters(a map[string]any) bool {
-	for _, k := range []string{"talker", "chat", "after", "before", "type", "kind_name", "sender"} {
-		if getStr(a, k) != "" {
-			return true
-		}
+func searchNeedsPostFilter(a map[string]any) bool {
+	return firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type"), getStr(a, "sender")) != "" ||
+		getInt(a, "base_kind", 0) != 0
+}
+
+func filterLiveSearchRows(rows []wcdb.Row, a map[string]any, sender string) []wcdb.Row {
+	if !searchNeedsPostFilter(a) {
+		return rows
 	}
-	return getInt(a, "base_kind", 0) != 0
+	baseKind := getInt(a, "base_kind", 0)
+	kind := firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type"))
+	out := rows[:0]
+	for _, r := range rows {
+		if sender != "" && rowString(r, "sender_wxid") != sender {
+			continue
+		}
+		if baseKind != 0 && rowInt64(r, "base_kind") != int64(baseKind) {
+			continue
+		}
+		if kind != "" && !messageKindNameMatches(kind, rowString(r, "kind_name"), rowInt64(r, "base_kind")) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func messageKindNameMatches(want, got string, baseKind int64) bool {
+	want = strings.TrimSpace(strings.ToLower(want))
+	got = strings.TrimSpace(strings.ToLower(got))
+	switch want {
+	case "emoji":
+		want = "sticker"
+	case "app":
+		return baseKind == 49
+	case "text":
+		return baseKind == 1
+	case "image":
+		return baseKind == 3
+	case "voice":
+		return baseKind == 34
+	case "card":
+		return baseKind == 42
+	case "video":
+		return baseKind == 43
+	case "sticker":
+		return baseKind == 47
+	case "location":
+		return baseKind == 48
+	case "voip":
+		return baseKind == 50
+	case "system":
+		return baseKind == 10000
+	}
+	return got == want
 }
 
 // enrichSearchSender resolves sender_wxid + base_kind + kind_name for FTS
@@ -1666,35 +1942,37 @@ func (s *server) enrichSearchSender(rows []wcdb.Row) {
 	metaByKey := make(map[string]meta)
 	for talker, lids := range byTalker {
 		tableName := "Msg_" + talkerHash(talker)
-		msgDB, err := s.findMsgDB(tableName)
+		shards, err := s.findMsgDBs(tableName)
 		if err != nil {
 			continue
 		}
-		n2i, _ := loadName2Id(msgDB)
 		ph := make([]string, len(lids))
 		args := make([]any, len(lids))
 		for i, lid := range lids {
 			ph[i] = "?"
 			args[i] = lid
 		}
-		metaRows, qerr := msgDB.Query(fmt.Sprintf(
-			"SELECT local_id, real_sender_id, local_type FROM %s WHERE local_id IN (%s)",
-			tableName, strings.Join(ph, ",")), args...)
-		msgDB.Close()
-		if qerr != nil {
-			continue
-		}
-		for _, mr := range metaRows {
-			lid, _ := mr["local_id"].(int64)
-			rsid, _ := mr["real_sender_id"].(int64)
-			lt, _ := mr["local_type"].(int64)
-			bk, _, name := wxkind.Unpack(lt)
-			m := meta{baseKind: bk, kindName: name}
-			if w, ok := n2i[rsid]; ok {
-				m.senderWxid = w
+		for _, shard := range shards {
+			n2i, _ := loadName2Id(shard.DB)
+			metaRows, qerr := shard.DB.Query(fmt.Sprintf(
+				"SELECT local_id, real_sender_id, local_type FROM %s WHERE local_id IN (%s)",
+				tableName, strings.Join(ph, ",")), args...)
+			if qerr != nil {
+				continue
 			}
-			metaByKey[talker+":"+strconv.FormatInt(lid, 10)] = m
+			for _, mr := range metaRows {
+				lid, _ := mr["local_id"].(int64)
+				rsid, _ := mr["real_sender_id"].(int64)
+				lt, _ := mr["local_type"].(int64)
+				bk, _, name := wxkind.Unpack(lt)
+				m := meta{baseKind: bk, kindName: name}
+				if w, ok := n2i[rsid]; ok {
+					m.senderWxid = w
+				}
+				metaByKey[talker+":"+strconv.FormatInt(lid, 10)] = m
+			}
 		}
+		closeMsgDBs(shards)
 	}
 	for _, r := range rows {
 		t, _ := r["talker"].(string)
@@ -1861,11 +2139,6 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 		senderFilter = cands[0].Username
 	}
 	needsMessageMeta := afterTS > 0 || beforeTS > 0
-	if needsMessageMeta {
-		if _, err := openCache(); err != nil {
-			return nil, fmt.Errorf("red_packets time filters require cache index; run `wx-mcp cache refresh` first: %w", err)
-		}
-	}
 	db, err := s.openDB("general", "general.db")
 	if err != nil {
 		return nil, err
@@ -1901,7 +2174,7 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 		return nil, err
 	}
 	if needsMessageMeta {
-		meta := cacheMessageMeta(cacheDB, rows, "message_server_id", "session_username")
+		meta := s.liveMessageMeta(rows, "message_server_id", "session_username")
 		filtered := rows[:0]
 		for _, r := range rows {
 			if m, ok := meta[messagePairKey(rowString(r, "session_username"), rowInt64(r, "message_server_id"))]; ok {
@@ -2437,7 +2710,7 @@ func maxIntegerArg(tool, key string) (int64, bool) {
 		switch tool {
 		case "export_messages":
 			return 100000, true
-		case "new_messages", "sql":
+		case "sql":
 			return 1000, true
 		default:
 			return 5000, true
@@ -2825,10 +3098,11 @@ type xmlMsgReferMsg struct {
 }
 
 // fetchMessageContent batch-loads message_content (zstd decoded) for a list of
-// (talker, server_id) pairs. Groups by talker → routes to the matching
-// Msg_<hash> shard → single IN query per talker. Returns server_id → content
-// map; entries missing means lookup failed (table not found / row gone) and
-// caller should treat the enrichment field as absent rather than error.
+// (talker, server_id) pairs. Groups by talker → routes to every matching
+// Msg_<hash> shard, because WeChat can keep one conversation table in multiple
+// message shard DBs over time. Returns server_id → content map; entries missing
+// means lookup failed (table not found / row gone) and callers treat the
+// enrichment field as absent rather than error.
 func (s *server) fetchMessageContent(rows []wcdb.Row, sidCol, talkerCol string) map[int64]string {
 	byTalker := make(map[string][]int64)
 	for _, r := range rows {
@@ -2842,7 +3116,7 @@ func (s *server) fetchMessageContent(rows []wcdb.Row, sidCol, talkerCol string) 
 	out := make(map[int64]string)
 	for talker, sids := range byTalker {
 		tableName := "Msg_" + talkerHash(talker)
-		msgDB, err := s.findMsgDB(tableName)
+		shards, err := s.findMsgDBs(tableName)
 		if err != nil {
 			continue
 		}
@@ -2852,19 +3126,21 @@ func (s *server) fetchMessageContent(rows []wcdb.Row, sidCol, talkerCol string) 
 			ph[i] = "?"
 			args[i] = sid
 		}
-		contentRows, qerr := msgDB.Query(fmt.Sprintf(
-			"SELECT server_id, message_content FROM %s WHERE server_id IN (%s)",
-			tableName, strings.Join(ph, ",")), args...)
-		msgDB.Close()
-		if qerr != nil {
-			continue
+		for _, shard := range shards {
+			contentRows, qerr := shard.DB.Query(fmt.Sprintf(
+				"SELECT server_id, message_content FROM %s WHERE server_id IN (%s)",
+				tableName, strings.Join(ph, ",")), args...)
+			if qerr != nil {
+				continue
+			}
+			decoded := decodeFields(contentRows, "message_content")
+			for _, cr := range decoded {
+				sid, _ := cr["server_id"].(int64)
+				content, _ := cr["message_content"].(string)
+				out[sid] = content
+			}
 		}
-		decoded := decodeFields(contentRows, "message_content")
-		for _, cr := range decoded {
-			sid, _ := cr["server_id"].(int64)
-			content, _ := cr["message_content"].(string)
-			out[sid] = content
-		}
+		closeMsgDBs(shards)
 	}
 	return out
 }
@@ -2873,9 +3149,9 @@ func messagePairKey(talker string, serverID int64) string {
 	return talker + "\x00" + strconv.FormatInt(serverID, 10)
 }
 
-func cacheMessageMeta(db *wcdb.DB, rows []wcdb.Row, sidCol, talkerCol string) map[string]wcdb.Row {
+func (s *server) liveMessageMeta(rows []wcdb.Row, sidCol, talkerCol string) map[string]wcdb.Row {
 	out := map[string]wcdb.Row{}
-	if db == nil || len(rows) == 0 {
+	if len(rows) == 0 {
 		return out
 	}
 	byTalker := make(map[string][]int64)
@@ -2887,24 +3163,42 @@ func cacheMessageMeta(db *wcdb.DB, rows []wcdb.Row, sidCol, talkerCol string) ma
 		}
 		byTalker[t] = append(byTalker[t], sid)
 	}
+	var allMeta []wcdb.Row
 	for talker, sids := range byTalker {
+		tableName := "Msg_" + talkerHash(talker)
+		shards, err := s.findMsgDBs(tableName)
+		if err != nil {
+			continue
+		}
 		ph := make([]string, len(sids))
-		args := make([]any, 0, len(sids)+1)
-		args = append(args, talker)
+		args := make([]any, 0, len(sids))
 		for i, sid := range sids {
 			ph[i] = "?"
 			args = append(args, sid)
 		}
-		metaRows, err := db.Query(fmt.Sprintf(`SELECT talker, server_id, create_time, create_time_human,
-			sender_wxid, sender_display_name
-			FROM messages_unified
-			WHERE talker = ? AND server_id IN (%s)`, strings.Join(ph, ",")), args...)
-		if err != nil {
-			continue
+		for _, shard := range shards {
+			n2i, _ := loadName2Id(shard.DB)
+			metaRows, qerr := shard.DB.Query(fmt.Sprintf(`SELECT server_id, create_time, real_sender_id
+				FROM %s WHERE server_id IN (%s)`, quoteIdent(tableName), strings.Join(ph, ",")), args...)
+			if qerr != nil {
+				continue
+			}
+			if n2i != nil {
+				metaRows = resolveSenders(metaRows, n2i)
+			}
+			for _, mr := range metaRows {
+				mr["talker"] = talker
+				if ct := rowInt64(mr, "create_time"); ct != 0 {
+					mr["create_time_human"] = time.Unix(ct, 0).Format("2006-01-02 15:04:05")
+				}
+				allMeta = append(allMeta, mr)
+			}
 		}
-		for _, mr := range metaRows {
-			out[messagePairKey(rowString(mr, "talker"), rowInt64(mr, "server_id"))] = mr
-		}
+		closeMsgDBs(shards)
+	}
+	s.attachDisplayNames(allMeta, [2]string{"sender_wxid", "sender_display_name"})
+	for _, mr := range allMeta {
+		out[messagePairKey(rowString(mr, "talker"), rowInt64(mr, "server_id"))] = mr
 	}
 	return out
 }

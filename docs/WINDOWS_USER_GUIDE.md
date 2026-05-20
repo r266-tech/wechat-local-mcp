@@ -170,8 +170,9 @@ D:\wx-mcp\wx-mcp.exe sessions --limit 5
 D:\wx-mcp\wx-mcp.exe contacts --limit 5
 ```
 
-A healthy refresh contains non-zero counts for contacts, sessions, and messages,
-and `message_errors` should be `0`.
+A healthy refresh contains non-zero counts for contacts and sessions. Chat
+message bodies are not cached; `messages`, `search`, and single-chat
+`export_messages` read the live WeChat DB when called.
 
 Example success shape:
 
@@ -179,9 +180,9 @@ Example success shape:
 {
   "stats": {
     "contacts": 8605,
-    "messages": 52730,
     "sessions": 316,
-    "message_errors": 0
+    "skipped_live_source": 24,
+    "source_dbs": 26
   }
 }
 ```
@@ -254,19 +255,28 @@ Then rerun the installer.
 - Do not upload `C:\Users\<you>\.wx-mcp\cache` or `C:\Users\<you>\.config\wxcli`
   to issue trackers or chat systems.
 
-## Uninstall
+## Reset / Uninstall
 
-Remove the install directory:
+Use the installer so MCP client registrations are removed as well as files.
 
-```powershell
-Remove-Item -LiteralPath D:\wx-mcp -Recurse -Force
-```
-
-Optional user data cleanup:
+Clear keys/cache/logs but keep the installed binaries:
 
 ```powershell
-Remove-Item -LiteralPath "$env:USERPROFILE\.config\wxcli" -Recurse -Force
-Remove-Item -LiteralPath "$env:USERPROFILE\.wx-mcp" -Recurse -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ClearState -Yes -Json
 ```
 
-Only remove user data if you no longer need cached indexes or key config.
+Uninstall binaries and MCP registration while keeping keys/cache:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Yes -Json
+```
+
+Return to a fresh-user state:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -PurgeState -Yes -Json
+```
+
+`-ClearState` / `-PurgeState` delete
+`%USERPROFILE%\.config\wxcli\config.json`, `%USERPROFILE%\.wx-mcp`, and
+installer logs, but keep `%USERPROFILE%\.config\wxcli\lib`.

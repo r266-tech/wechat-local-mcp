@@ -5,6 +5,8 @@ param(
   [switch]$DryRun,
   [switch]$Update,
   [switch]$Uninstall,
+  [switch]$PurgeState,
+  [switch]$ClearState,
   [switch]$Refresh,
   [switch]$BackgroundRefresh,
   [switch]$Doctor,
@@ -36,6 +38,7 @@ $nextAction = ""
 $logDir = Join-Path $InstallDir "logs"
 $log = Join-Path $logDir "install.log"
 $refreshRan = $false
+$purgeState = [bool]($PurgeState -or $ClearState)
 
 function Add-Action([string]$s) { $actions.Add($s) | Out-Null }
 function Add-Warning([string]$s) { $warnings.Add($s) | Out-Null }
@@ -57,6 +60,7 @@ function Finish {
     install_dir = $InstallDir
     log = $log
     dry_run = [bool]$DryRun
+    purge_state = [bool]$script:purgeState
     mcp_registered = ($registered.Count -gt 0)
     mcp_registered_clients = @($registered)
     refresh_ran = [bool]$script:refreshRan
@@ -148,6 +152,9 @@ function Register-Mcp {
   $found = $false
   if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
     Add-Action "register Codex MCP server wx-mcp"
+    if ($DryRun) {
+      $found = $true
+    } else {
     try {
       & codex mcp remove wx-mcp *> $null
       & codex mcp add wx-mcp -- $exe *> $null
@@ -156,9 +163,13 @@ function Register-Mcp {
     } catch {
       Add-Warning "Codex MCP registration failed: $($_.Exception.Message)"
     }
+    }
   }
   if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
     Add-Action "register Claude MCP server wx-mcp"
+    if ($DryRun) {
+      $found = $true
+    } else {
     try {
       & claude mcp remove -s user wx-mcp *> $null
       & claude mcp add -s user wx-mcp $exe *> $null
@@ -167,9 +178,34 @@ function Register-Mcp {
     } catch {
       Add-Warning "Claude MCP registration failed: $($_.Exception.Message)"
     }
+    }
   }
   if (-not $found -and $McpClient -eq "auto") {
     Add-Warning "no supported MCP client command found; skipped registration"
+  }
+}
+
+function Remove-McpEntries {
+  if ($NoMcp -or $McpClient -eq "none") { return }
+  if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
+    Add-Action "remove Codex MCP server wx-mcp"
+    if (-not $DryRun) {
+      try {
+        & codex mcp remove wx-mcp *> $null
+      } catch {
+        Add-Warning "Codex MCP removal failed: $($_.Exception.Message)"
+      }
+    }
+  }
+  if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
+    Add-Action "remove Claude MCP server wx-mcp"
+    if (-not $DryRun) {
+      try {
+        & claude mcp remove -s user wx-mcp *> $null
+      } catch {
+        Add-Warning "Claude MCP removal failed: $($_.Exception.Message)"
+      }
+    }
   }
 }
 
@@ -239,29 +275,84 @@ function Run-CacheRefresh {
   if (-not ($All -or $Refresh)) { return }
   $exe = Join-Path $InstallDir "wx-mcp.exe"
   if ($BackgroundRefresh) {
-    Add-Action "start cache refresh in background"
+    Add-Action "start metadata cache refresh in background"
     if ($DryRun) { return }
     & $exe cache refresh --background 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "cache refresh background start failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "metadata cache refresh background start failed with exit code $LASTEXITCODE" }
     $script:status = "warming_cache"
-    $script:nextAction = "wx-mcp is installed; cache refresh is warming in the background."
+    $script:nextAction = "wx-mcp is installed; metadata cache refresh is warming in the background."
     $script:refreshRan = $true
     return
   }
 
-  Add-Action "run cache refresh in foreground to verify Windows key setup"
+  Add-Action "run metadata cache refresh in foreground to verify Windows key setup"
   if ($DryRun) { return }
   & $exe cache refresh --force 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "cache refresh failed with exit code $LASTEXITCODE" }
+  if ($LASTEXITCODE -ne 0) { throw "metadata cache refresh failed with exit code $LASTEXITCODE" }
   $script:status = "ready"
-  $script:nextAction = "wx-mcp is installed and the cache refresh completed."
+  $script:nextAction = "wx-mcp is installed and the metadata cache refresh completed."
   $script:refreshRan = $true
+}
+
+function Clear-LegacyMessageCache {
+  $cacheRoot = Join-Path $HOME ".wx-mcp\cache"
+  if (-not (Test-Path $cacheRoot)) { return }
+  Add-Action "drop existing cache indexes and non-metadata raw snapshots under $cacheRoot"
+  if ($DryRun) { return }
+  Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    foreach ($name in @("index.sqlite", "index.sqlite-wal", "index.sqlite-shm")) {
+      $p = Join-Path $_.FullName $name
+      if (Test-Path $p) { Remove-Item -LiteralPath $p -Force }
+    }
+    $raw = Join-Path $_.FullName "raw"
+    if (Test-Path $raw) {
+      Get-ChildItem -LiteralPath $raw -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -notin @("contact", "session")) {
+          Remove-Item -LiteralPath $_.FullName -Recurse -Force
+        }
+      }
+    }
+  }
+}
+
+function Add-PurgeStateActions {
+  Add-Action ("remove wxkey config file {0}" -f (Join-Path $HOME ".config\wxcli\config.json"))
+  Add-Action ("remove wx-mcp state dir {0}" -f (Join-Path $HOME ".wx-mcp"))
+  Add-Action "remove wx-mcp install logs $logDir"
+}
+
+function Invoke-PurgeState {
+  $paths = @(
+    (Join-Path $HOME ".config\wxcli\config.json"),
+    (Join-Path $HOME ".wx-mcp"),
+    $logDir
+  )
+  foreach ($path in $paths) {
+    if (Test-Path $path) {
+      Remove-Item -LiteralPath $path -Recurse -Force
+    }
+  }
+}
+
+function Clear-State {
+  Add-PurgeStateActions
+  if (-not $DryRun) {
+    Invoke-PurgeState
+  }
+  $script:status = "state_cleared"
 }
 
 function Uninstall-WxMcp {
   Add-Action "remove install directory $InstallDir"
+  Remove-McpEntries
+  if ($script:purgeState) {
+    Add-PurgeStateActions
+  }
   if (-not $DryRun -and (Test-Path $InstallDir)) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
+  }
+  if (-not $DryRun -and $script:purgeState) {
+    Invoke-PurgeState
   }
   $script:status = "removed"
 }
@@ -278,8 +369,13 @@ function Run-Doctor {
 
 try {
   if ($Doctor) { $mode = "doctor" }
+  elseif ($ClearState) { $mode = "clear-state" }
   elseif ($Uninstall) { $mode = "uninstall" }
   elseif ($Update) { $mode = "update" }
+
+  if ($PurgeState -and -not ($Uninstall -or $ClearState)) {
+    throw "-PurgeState is only valid with -Uninstall; use -ClearState to remove state without uninstalling"
+  }
 
   if ($Doctor) {
     Run-Doctor
@@ -287,6 +383,11 @@ try {
   }
 
   Confirm-Or-Die
+
+  if ($ClearState) {
+    Clear-State
+    Finish 0
+  }
 
   if ($Uninstall) {
     Uninstall-WxMcp
@@ -298,9 +399,8 @@ try {
   }
 
   Install-Components
-  if (-not $DryRun) {
-    Register-Mcp
-  }
+  Clear-LegacyMessageCache
+  Register-Mcp
   Run-CacheRefresh
   if ($DryRun) {
     $status = "dry_run"

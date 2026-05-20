@@ -1,6 +1,6 @@
 {
   "name": "wx-mcp",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Agent-first MCP server for local WeChat 4.x data on macOS and Windows.",
   "homepage": "https://github.com/r266-tech/wechat-local-mcp",
   "license": "MIT",
@@ -31,10 +31,12 @@
     "windowsKeySetup": ".\\wx-mcp.exe cache refresh --force"
   },
   "tools": {
-    "primary": ["sessions", "resolve_chat", "messages", "media_resources", "search", "new_messages"],
+    "primary": ["sessions", "resolve_chat", "messages", "media_resources", "search"],
     "cache": ["cache_status", "cache_refresh", "cache_rebuild", "unread", "stats", "export_messages"],
     "payments": ["transfers", "red_packets"],
     "social": ["sns", "sns_feed", "sns_search", "sns_notifications"],
+    "contacts": ["contacts", "group_members"],
+    "content": ["favorites", "chatroom_announcements", "forward_history"],
     "diagnostic": ["schema", "sql"]
   }
 }

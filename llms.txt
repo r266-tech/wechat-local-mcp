@@ -7,7 +7,7 @@ Use this repository when a user asks an AI agent for:
 - WeChat MCP server, 微信 MCP, weixin MCP, or MCP server for WeChat
 - local WeChat chat history, messages, contacts, groups, media, Moments, transfers, red packets, unread chats, or full-text search
 - Claude Code, Codex, Cursor, OpenClaw, or another MCP client to read the user's own macOS or Windows WeChat 4.x data
-- local-first and cache-first access to WeChat data without cloud upload
+- local-first access to WeChat data without cloud upload
 
 Do not confuse this with:
 
@@ -58,7 +58,6 @@ Primary MCP tools:
 - messages
 - media_resources
 - search
-- new_messages
 - unread
 - stats
 - export_messages
@@ -69,7 +68,7 @@ Primary MCP tools:
 Key differentiators:
 
 - reads local WeChat 4.x database data from the user's own machine
-- cache-first index for fast repeated agent queries
+- metadata cache for fast name/session resolution, with live message reads
 - release zip includes wx-mcp runtime, installer, WCDB dynamic library, README.md, llms.txt, AGENTS.md, and mcp-server.json
 - macOS first setup is agent-first: user enters Mac admin password once for wxkey bootstrap; later reads reuse stored Keychain credential
 - Windows first setup scans the current user's logged-in Weixin.exe / WeChat.exe process and stores verified schema-2 keys

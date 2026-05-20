@@ -22,6 +22,7 @@ DO_BOOTSTRAP=0
 DO_REFRESH=0
 DO_WATCHER=0
 REGISTER_MCP=1
+PURGE_STATE=0
 
 WXMCP_MODE=""
 WXMCP_SOURCE=""
@@ -51,22 +52,24 @@ Usage:
   ./install.sh --doctor [--json]
   ./install.sh --dry-run --all --json
   ./install.sh --uninstall --yes [--json]
+  ./install.sh --uninstall --purge-state --yes [--json]
+  ./install.sh --clear-state --yes [--json]
 
 Install options:
   --all                     Install, register MCP, run wxkey bootstrap,
-                            and refresh cache (does NOT install watcher;
+                            and refresh metadata cache (does NOT install watcher;
                             add --watcher explicitly if you want periodic
                             background refresh — see README on TCC trade-off).
   --update                  Update an existing git checkout with
                             `git pull --ff-only`, then reinstall binaries.
-                            Does not bootstrap, refresh cache, register MCP,
+                            Does not bootstrap, refresh metadata cache, register MCP,
                             or touch watcher unless those flags are added.
   --bootstrap               Run wxkey bootstrap after installing binaries.
-  --refresh                 Start wx-mcp cache refresh after installing binaries.
+  --refresh                 Start wx-mcp metadata cache refresh after installing binaries.
                             Defaults to background warmup; set
                             WX_MCP_INSTALL_SYNC_REFRESH=1 for foreground wait.
   --watcher                 Install launchd cache watcher (5-min periodic
-                            cache refresh). WARNING: on macOS 15+ each refresh
+                            metadata cache refresh). WARNING: on macOS 15+ each refresh
                             triggers a "wx-mcp wants to access another app's
                             data" TCC prompt unless wx-mcp has Full Disk Access
                             granted in System Settings → Privacy & Security.
@@ -79,6 +82,11 @@ Install options:
   --dry-run                 Report planned actions without writing.
   --doctor                  Check local install prerequisites/status.
   --uninstall               Remove installed files, watcher plist, and MCP entry.
+  --purge-state             With --uninstall, also remove wx-mcp state:
+                            ~/.config/wxcli/config.json, ~/.wx-mcp, logs,
+                            and the wxkey Keychain sudo credential.
+  --clear-state             Only remove wx-mcp state; keep installed binaries
+                            and MCP registration.
 
 Environment:
   WX_MCP_INSTALL_DIR        Override install directory.
@@ -153,6 +161,7 @@ emit_json() {
   print "  \"watcher_installed\": $(json_bool "$WATCHER_INSTALLED"),"
   print "  \"bootstrap_ran\": $(json_bool "$BOOTSTRAP_RAN"),"
   print "  \"refresh_ran\": $(json_bool "$REFRESH_RAN"),"
+  print "  \"purge_state\": $(json_bool "$PURGE_STATE"),"
   print -n "  \"mcp_registered_clients\": "; json_array "${MCP_REGISTERED_CLIENTS[@]}"; print ","
   print -n "  \"checks\": "; json_array "${CHECKS[@]}"; print ","
   print -n "  \"actions\": "; json_array "${ACTIONS[@]}"; print ","
@@ -256,6 +265,17 @@ parse_args() {
         MODE="uninstall"
         shift
         ;;
+      --clear-state)
+        MODE="clear-state"
+        PURGE_STATE=1
+        REGISTER_MCP=0
+        MCP_CLIENT="none"
+        shift
+        ;;
+      --purge-state)
+        PURGE_STATE=1
+        shift
+        ;;
       --update)
         MODE="update"
         REGISTER_MCP=0
@@ -269,7 +289,7 @@ parse_args() {
         # watcher intentionally NOT in --all: on macOS 15+ the periodic
         # cross-container access triggers TCC re-prompts ("wx-mcp 想访问其他
         # App 的数据") repeatedly for ad-hoc signed binaries. Users who
-        # actually want background cache refresh can pass --watcher.
+        # actually want background metadata cache refresh can pass --watcher.
         shift
         ;;
       --bootstrap)
@@ -338,9 +358,12 @@ parse_args() {
     auto|claude|codex|none) ;;
     *) die "--mcp-client must be auto, claude, codex, or none" 2 ;;
   esac
+  if [[ "$PURGE_STATE" -eq 1 && "$MODE" != "uninstall" && "$MODE" != "clear-state" ]]; then
+    die "--purge-state is only valid with --uninstall; use --clear-state to remove state without uninstalling" 2
+  fi
   [[ "$WATCHER_INTERVAL" == <-> ]] || die "--watcher-interval must be an integer" 2
   if [[ "$WATCHER_INTERVAL" -lt 60 ]]; then
-    warn "watcher interval below 60s is allowed but may overlap long cache refreshes"
+    warn "watcher interval below 60s is allowed but may overlap long metadata cache refreshes"
   fi
 }
 
@@ -526,6 +549,23 @@ register_codex_mcp() {
   MCP_REGISTERED_CLIENTS+=("codex")
 }
 
+remove_mcp_entries() {
+  [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" ]] || return
+  local client="$MCP_CLIENT"
+  if [[ "$client" == "auto" || "$client" == "claude" ]]; then
+    ACTIONS+=("remove Claude MCP server $MCP_NAME")
+    if [[ "$DRY_RUN" -eq 0 && -n "$(command -v claude 2>/dev/null)" ]]; then
+      run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
+    fi
+  fi
+  if [[ "$client" == "auto" || "$client" == "codex" ]]; then
+    ACTIONS+=("remove Codex MCP server $MCP_NAME")
+    if [[ "$DRY_RUN" -eq 0 && -n "$(command -v codex 2>/dev/null)" ]]; then
+      run_logged codex mcp remove "$MCP_NAME" || true
+    fi
+  fi
+}
+
 classify_install_log_blocker() {
   local text=""
   if [[ -f "$INSTALL_LOG" ]]; then
@@ -576,18 +616,18 @@ run_bootstrap() {
 
 run_cache_refresh() {
   [[ "$DO_REFRESH" -eq 1 ]] || return
-  ACTIONS+=("start wx-mcp cache refresh in background")
+  ACTIONS+=("start wx-mcp metadata cache refresh in background")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
   if [[ "${WX_MCP_INSTALL_SYNC_REFRESH:-0}" == "1" ]]; then
-    ACTIONS+=("run wx-mcp cache refresh in foreground because WX_MCP_INSTALL_SYNC_REFRESH=1")
-    run_logged "$INSTALL_DIR/wx-mcp" cache refresh || die "cache refresh failed; see $INSTALL_LOG" 1
+    ACTIONS+=("run wx-mcp metadata cache refresh in foreground because WX_MCP_INSTALL_SYNC_REFRESH=1")
+    run_logged "$INSTALL_DIR/wx-mcp" cache refresh || die "metadata cache refresh failed; see $INSTALL_LOG" 1
     INSTALL_STATUS="ready"
   else
-    run_logged "$INSTALL_DIR/wx-mcp" cache refresh --background || die "cache refresh background start failed; see $INSTALL_LOG" 1
+    run_logged "$INSTALL_DIR/wx-mcp" cache refresh --background || die "metadata cache refresh background start failed; see $INSTALL_LOG" 1
     INSTALL_STATUS="warming_cache"
-    NEXT_ACTION="wx-mcp is installed; cache refresh is warming in the background and cache-backed tools will freshness-check before returning data."
+    NEXT_ACTION="wx-mcp is installed; metadata cache refresh is warming in the background and name/session tools will freshness-check before returning data."
     CHECKS+=("cache_refresh_background=true")
   fi
   REFRESH_RAN=1
@@ -675,6 +715,29 @@ install_watcher() {
   WATCHER_INSTALLED=1
 }
 
+cleanup_legacy_message_cache() {
+  local cache_root="$HOME/.wx-mcp/cache"
+  [[ -d "$cache_root" ]] || return
+  ACTIONS+=("drop existing cache indexes and non-metadata raw snapshots under $cache_root")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  local root child
+  for root in "$cache_root"/*; do
+    [[ -d "$root" ]] || continue
+    rm -f "$root/index.sqlite" "$root/index.sqlite-wal" "$root/index.sqlite-shm"
+    if [[ -d "$root/raw" ]]; then
+      for child in "$root/raw"/*; do
+        [[ -e "$child" ]] || continue
+        case "$(basename "$child")" in
+          contact|session) ;;
+          *) rm -rf "$child" ;;
+        esac
+      done
+    fi
+  done
+}
+
 doctor() {
   [[ "$(uname -s)" == "Darwin" ]] && CHECKS+=("os=Darwin") || WARNINGS+=("os is not Darwin")
   CHECKS+=("arch=$(uname -m)")
@@ -703,25 +766,71 @@ doctor() {
   fi
 }
 
-uninstall() {
-  ACTIONS+=("remove watcher $WATCHER_LABEL")
-  ACTIONS+=("remove install dir $INSTALL_DIR")
-  if [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" ]]; then
-    ACTIONS+=("remove Claude MCP server $MCP_NAME")
+sudo_keychain_account() {
+  if [[ -n "${WXKEY_ORIG_USER:-}" && "${WXKEY_ORIG_USER:-}" != "root" ]]; then
+    print -r -- "$WXKEY_ORIG_USER"
+  elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+    print -r -- "$SUDO_USER"
+  elif [[ -n "${USER:-}" ]]; then
+    print -r -- "$USER"
+  else
+    id -un 2>/dev/null || print -r -- "wx-mcp"
   fi
+}
+
+queue_purge_state_actions() {
+  ACTIONS+=("remove wxkey config file $HOME/.config/wxcli/config.json")
+  ACTIONS+=("remove wx-mcp state dir $HOME/.wx-mcp")
+  ACTIONS+=("remove wx-mcp logs $LOG_DIR")
+  ACTIONS+=("delete Keychain generic password r266.wx-mcp.sudo for account $(sudo_keychain_account)")
+}
+
+run_purge_state() {
+  rm -f "$HOME/.config/wxcli/config.json"
+  rm -rf "$HOME/.wx-mcp"
+  if [[ -x /usr/bin/security ]]; then
+    /usr/bin/security delete-generic-password -a "$(sudo_keychain_account)" -s "r266.wx-mcp.sudo" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$LOG_DIR"
+}
+
+remove_watcher() {
+  ACTIONS+=("remove watcher $WATCHER_LABEL")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
-
   local domain="gui/$(id -u)"
   if [[ -f "$PLIST_PATH" ]]; then
     run_logged launchctl bootout "$domain" "$PLIST_PATH" || true
     rm -f "$PLIST_PATH"
   fi
-  if [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" && "$MCP_CLIENT" != "auto" ]] || [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" == "auto" && -n "$(command -v claude 2>/dev/null)" ]]; then
-    run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
+  rm -f "$INSTALL_DIR/watcher.sh"
+}
+
+clear_state() {
+  remove_watcher
+  queue_purge_state_actions
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
   fi
+  run_purge_state
+}
+
+uninstall() {
+  remove_watcher
+  ACTIONS+=("remove install dir $INSTALL_DIR")
+  remove_mcp_entries
+  if [[ "$PURGE_STATE" -eq 1 ]]; then
+    queue_purge_state_actions
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+
   rm -rf "$INSTALL_DIR"
+  if [[ "$PURGE_STATE" -eq 1 ]]; then
+    run_purge_state
+  fi
 }
 
 main() {
@@ -741,9 +850,15 @@ main() {
       uninstall
       finish true
       ;;
+    clear-state)
+      confirm_or_die
+      clear_state
+      finish true
+      ;;
     install)
       confirm_or_die
       install_components
+      cleanup_legacy_message_cache
       register_mcp
       run_bootstrap
       run_cache_refresh
@@ -754,6 +869,7 @@ main() {
       confirm_or_die
       update_source
       install_components
+      cleanup_legacy_message_cache
       register_mcp
       run_bootstrap
       run_cache_refresh
