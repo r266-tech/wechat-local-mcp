@@ -175,15 +175,15 @@ go test ./...
 ## 打分发包 (给朋友)
 
 ```bash
-WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.5.1
-# 产出 dist/wx-mcp-v1.5.1-darwin-arm64.zip + .sha256 (含 wx-mcp + wxkey + libWCDB.dylib + install.sh + docs)
+WX_MCP_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.5.2
+# 产出 dist/wx-mcp-v1.5.2-darwin-arm64.zip + .sha256 (含 wx-mcp + wxkey + libWCDB.dylib + install.sh + docs)
 ```
 
 Windows 包在 Windows 机器上打:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 1.5.1 -WcdbLib C:\path\to\libWCDB.dll
-# 产出 dist\wx-mcp-v1.5.1-windows-amd64.zip + .sha256 (含 wx-mcp.exe + libWCDB.dll + install.ps1 + docs)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 1.5.2 -WcdbLib C:\path\to\libWCDB.dll
+# 产出 dist\wx-mcp-v1.5.2-windows-amd64.zip + .sha256 (含 wx-mcp.exe + libWCDB.dll + install.ps1 + docs)
 ```
 
 朋友解压后:
@@ -335,7 +335,7 @@ wx-mcp 的运行时解密/读库本身不依赖 SIP: config 已有 key 时, 直�
 
 分发 zip 结构:
 ```
-wx-mcp-v1.5.1-darwin-arm64/
+wx-mcp-v1.5.2-darwin-arm64/
 ├── wx-mcp              (~10MB Go binary)
 ├── wxkey               (~3MB key 提取 CLI, 同目录被 wx-mcp spawn)
 ├── libWCDB.dylib       (~5MB Tencent WCDB, 随 binary 同目录加载)
@@ -350,7 +350,7 @@ wx-mcp-v1.5.1-darwin-arm64/
 
 Windows 分发 zip 结构:
 ```
-wx-mcp-v1.5.1-windows-amd64/
+wx-mcp-v1.5.2-windows-amd64/
 ├── wx-mcp.exe
 ├── libWCDB.dll
 ├── install.ps1
@@ -365,7 +365,7 @@ wx-mcp-v1.5.1-windows-amd64/
 
 ## Changelog
 
-### Unreleased
+### v1.5.2 (2026-05-21)
 - metadata refresh 期间如果 contact/session 源 DB 又变化, 普通查询静默使用最近一次完成的 metadata snapshot, 不再向用户输出容易误解为失败的 warning.
 - `cache_status.metadata_stale_reason` 保留诊断信息, 但将 metadata 漂移原因改成人类可读文案.
 

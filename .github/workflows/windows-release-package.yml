@@ -6,7 +6,7 @@ on:
       version:
         description: "wx-mcp release version without leading v"
         required: true
-        default: "1.5.1"
+        default: "1.5.2"
       wcdb_version:
         description: "Tencent/WCDB release version without leading v"
         required: true
