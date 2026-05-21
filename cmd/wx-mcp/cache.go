@@ -165,7 +165,6 @@ func (s *server) ensureCacheFresh(paths cachePaths) error {
 		}
 		if !fresh {
 			if cacheDriftedAfterRefresh(reason) {
-				fmt.Fprintf(os.Stderr, "[wx-mcp] cache source changed again during refresh (%s); returning latest completed snapshot\n", reason)
 				return nil
 			}
 			return fmt.Errorf("cache refresh completed but cache is still not usable: %s", reason)
@@ -189,6 +188,30 @@ func (s *server) ensureCacheFresh(paths cachePaths) error {
 
 func cacheDriftedAfterRefresh(reason string) bool {
 	return strings.HasPrefix(reason, "changed source db: ")
+}
+
+func metadataStatusReason(reason string) string {
+	if rel, ok := strings.CutPrefix(reason, "changed source db: "); ok {
+		if isMetadataCacheSource(rel) {
+			return "metadata source changed since last snapshot: " + rel
+		}
+	}
+	if rel, ok := strings.CutPrefix(reason, "new source db: "); ok {
+		if isMetadataCacheSource(rel) {
+			return "new metadata source detected: " + rel
+		}
+	}
+	if rel, ok := strings.CutPrefix(reason, "snapshot missing: "); ok {
+		if isMetadataCacheSource(rel) {
+			return "metadata snapshot missing: " + rel
+		}
+	}
+	if rel, ok := strings.CutPrefix(reason, "critical snapshot error: "); ok {
+		if isMetadataCacheSource(rel) {
+			return "metadata snapshot error: " + rel
+		}
+	}
+	return reason
 }
 
 func (s *server) cacheFreshness(cfg *config.Config, paths cachePaths) (bool, string, error) {
@@ -348,7 +371,7 @@ func (s *server) toolCacheStatus(a map[string]any) (any, error) {
 	if cfg.DBRoot != "" {
 		if fresh, reason, err := s.cacheFreshness(cfg, paths); err == nil {
 			if !fresh && reason != "" {
-				out["metadata_stale_reason"] = reason
+				out["metadata_stale_reason"] = metadataStatusReason(reason)
 			}
 		}
 	}

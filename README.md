@@ -364,6 +364,10 @@ wx-mcp-v1.5.1-windows-amd64/
 
 ## Changelog
 
+### Unreleased
+- metadata refresh 期间如果 contact/session 源 DB 又变化, 普通查询静默使用最近一次完成的 metadata snapshot, 不再向用户输出容易误解为失败的 warning.
+- `cache_status.metadata_stale_reason` 保留诊断信息, 但将 metadata 漂移原因改成人类可读文案.
+
 ### v1.5.1 (2026-05-20)
 - 默认 cache 改为 metadata-only: 只缓存 contact/session 用于人名、群名和会话解析; 聊天正文由 `messages` / `search` / 单会话 `export_messages` 现查源 DB.
 - installer 和 metadata refresh 都会检测/清理旧 index/raw 里的正文 cache 痕迹, 避免升级后继续保留明文聊天记录 cache.

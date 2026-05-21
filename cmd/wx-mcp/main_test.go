@@ -288,11 +288,48 @@ func TestCriticalCacheSourceClassification(t *testing.T) {
 }
 
 func TestCacheDriftedAfterRefresh(t *testing.T) {
-	if !cacheDriftedAfterRefresh("changed source db: message/message_0.db") {
-		t.Fatalf("changed source db should be treated as post-refresh drift")
+	if !cacheDriftedAfterRefresh("changed source db: session/session.db") {
+		t.Fatalf("changed metadata source db should be treated as post-refresh drift")
 	}
-	if cacheDriftedAfterRefresh("critical snapshot error: message/message_0.db") {
+	if cacheDriftedAfterRefresh("critical snapshot error: session/session.db") {
 		t.Fatalf("critical snapshot errors must not be ignored")
+	}
+}
+
+func TestMetadataStatusReason(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   string
+	}{
+		{
+			reason: "changed source db: contact/contact.db",
+			want:   "metadata source changed since last snapshot: contact/contact.db",
+		},
+		{
+			reason: "new source db: session/session.db",
+			want:   "new metadata source detected: session/session.db",
+		},
+		{
+			reason: "snapshot missing: contact/contact.db",
+			want:   "metadata snapshot missing: contact/contact.db",
+		},
+		{
+			reason: "critical snapshot error: session/session.db",
+			want:   "metadata snapshot error: session/session.db",
+		},
+		{
+			reason: "legacy message cache present; rebuild metadata cache",
+			want:   "legacy message cache present; rebuild metadata cache",
+		},
+		{
+			reason: "changed source db: message/message_0.db",
+			want:   "changed source db: message/message_0.db",
+		},
+	}
+	for _, tt := range tests {
+		if got := metadataStatusReason(tt.reason); got != tt.want {
+			t.Fatalf("metadataStatusReason(%q) = %q, want %q", tt.reason, got, tt.want)
+		}
 	}
 }
 
