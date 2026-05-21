@@ -160,6 +160,11 @@ user explicitly wants background CPU cost.
 ## Agent Defaults
 
 - Prefer MCP tools over CLI stdout for production agent workflows.
+- Do not ask the user to run `wxkey doctor`, `wxkey setup`, `cache status`, or
+  installer diagnostics manually. The agent runs CLI/MCP diagnostics and setup
+  retries; the user only performs OS or WeChat GUI actions that an agent cannot
+  do, such as entering the one-time admin password or opening a specific missing
+  chat/page in WeChat.
 - Do not manually run `cache_refresh` before normal reads. Metadata-backed tools perform an internal refresh gate before returning data; use `cache_status` only to inspect metadata cache diagnostics and errors. If a human explicitly asks for refresh through MCP, prefer `cache_refresh` with `background=true` to avoid tool-call timeout.
 - Use `resolve_chat` before tools that accept human names.
 - Use `messages` with `fields=lite` unless raw XML or parsed payloads are needed.
@@ -171,6 +176,12 @@ user explicitly wants background CPU cost.
 ## Failure Handling
 
 - If macOS key setup fails, inspect installer `blocked_by` / `next_action`, then run `./wxkey doctor` if needed. Do not suggest disabling SIP; the supported recovery path is fixing the no-SIP sudo/Keychain route.
+- If macOS key setup returns partial key coverage, run `./wxkey doctor` yourself,
+  identify the missing DB paths, ask the user to open only the corresponding
+  chats/pages in WeChat, wait briefly, then rerun `./wxkey setup` yourself.
+  `./wxkey doctor` is the lightweight cached-coverage check; use
+  `./wxkey doctor --scan` only when live task_for_pid/current-heap coverage must
+  be revalidated.
 - If Windows key setup fails, inspect installer `blocked_by` / `next_action`, confirm WeChat/Weixin is logged in, confirm `WX_MCP_DB_ROOT` points to the account directory that directly contains `db_storage`, and rerun `.\wx-mcp.exe cache refresh --force`.
 - If a display-name chat lookup fails, call `resolve_chat` and pass the returned raw `username`.
 - If name/session cache-dependent filters fail, inspect `cache_status`; normal tool calls should already have attempted an automatic metadata refresh.

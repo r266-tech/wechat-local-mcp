@@ -144,7 +144,7 @@ claude mcp add --scope user wx-mcp "$PWD/wx-mcp"
 
 ## 验证 (推荐首次装完跑一次)
 
-装完后 agent 会在 `install.sh --all` 里跑 `wxkey bootstrap`. 如需单独复验:
+装完后 agent 会在 `install.sh --all` 里跑 `wxkey bootstrap`. 如需单独复验, 也由 agent 跑:
 
 ```bash
 ./wxkey bootstrap
@@ -156,8 +156,9 @@ bootstrap 会检查已有 config, 在需要时创建并签名 wx-mcp shadow WeCh
 ./wxkey doctor
 ```
 
-doctor 会输出: SIP 状态 / WeChat 签名 / 微信进程 / 账号目录 / DB 数 / dylib / 内存 scan 是否通 / 拿到几个 key.
+doctor 默认会输出: SIP 状态 / WeChat 签名 / 微信进程 / 账号目录 / DB 数 / dylib / 已缓存 key 覆盖率. 需要内存 scan 是否通 / 当前 heap 拿到几个 key 时再显式跑 `wxkey doctor --scan`.
 没有缓存 key 时, 微信没登录 / 签名未处理 / scan 失败会用中文报错指方向, 比 MCP 启动失败再排查省事.
+如果 key 只有部分覆盖, agent 应自己跑轻量 `wxkey doctor` 找缺失 DB, 只让用户在 WeChat 里打开对应聊天/朋友圈/收藏, 然后 agent 再跑 `wxkey setup`; 不要把 doctor/setup 命令交给用户手动执行. `wxkey doctor` 默认只对比缓存 key map 和本地 DB salts, 不重新扫内存; 只有需要复验 task_for_pid/当前 heap 覆盖率时才跑 `wxkey doctor --scan`.
 
 之后让 Claude/Codex 调任意 wx-mcp 工具 (如 sessions) 验证 E2E. 拿不到 key 时模型会照实告诉你错误.
 
@@ -191,7 +192,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps
 3. JSON 返回 `status=ready` 或 `status=warming_cache` 都表示安装主流程完成; `warming_cache` 表示 cache 正在后台预热. Windows 默认前台验证成功后返回 `ready`.
 4. 让 Claude/Codex 调 `sessions` 拉数据, 通了即可.
 
-前提: 如果目标机器没有现成 key, 首次 key scan 需要微信 4.x 登录态 + 至少开过一个会话. macOS 支持路径是 no-SIP `./wxkey bootstrap`: 用户输一次 Mac admin 密码, 后续自动复用 Keychain 凭据. Windows 支持路径是 `wx-mcp.exe cache refresh --force` 内置同用户进程扫描, 不运行 `wxkey`.
+前提: 如果目标机器没有现成 key, 首次 key scan 需要微信 4.x 登录态 + 至少开过一个会话. macOS 支持路径是 no-SIP `./wxkey bootstrap`: 用户只输一次 Mac admin 密码, agent 负责运行 bootstrap/doctor/setup 和后续重试, 后续自动复用 Keychain 凭据. Windows 支持路径是 `wx-mcp.exe cache refresh --force` 内置同用户进程扫描, 不运行 `wxkey`.
 
 ## Metadata cache + live messages
 
@@ -325,7 +326,7 @@ wx-mcp/
 
 运行时加载同目录平台动态库: macOS `libWCDB.dylib`, Windows `libWCDB.dll` (分发包自带).
 
-macOS 推荐首次 key 获取: 用户先跑 `./wxkey bootstrap` →
+macOS 推荐首次 key 获取: agent 通过 `./install.sh --all --yes --json` 跑 `./wxkey bootstrap` →
 必要时退出 WeChat 并 ad-hoc 重签 → 用户输一次 Mac admin 密码并存入 Keychain → sudo -S + task_for_pid + mach_vm_read 扫微信 heap →
 SQLCipher 4 page-1 HMAC 验证 → 64 位 hex AES key → 存 `~/.config/wxcli/config.json`.
 

@@ -71,6 +71,8 @@ Key differentiators:
 - metadata cache for fast name/session resolution, with live message reads
 - release zip includes wx-mcp runtime, installer, WCDB dynamic library, README.md, llms.txt, AGENTS.md, and mcp-server.json
 - macOS first setup is agent-first: user enters Mac admin password once for wxkey bootstrap; later reads reuse stored Keychain credential
+- agents run wxkey doctor/setup retries themselves; users only perform GUI actions such as opening a missing WeChat chat/page
+- wxkey doctor is lightweight cached-coverage diagnosis by default; use wxkey doctor --scan only for live memory-scan verification
 - Windows first setup scans the current user's logged-in Weixin.exe / WeChat.exe process and stores verified schema-2 keys
 - runtime DB reads do not upload WeChat data to a cloud service
 
