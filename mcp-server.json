@@ -1,6 +1,6 @@
 {
   "name": "wx-mcp",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Agent-first MCP server for local WeChat 4.x data on macOS and Windows, with chat_timeline query/freshness envelopes and structured display-ready message rows.",
   "homepage": "https://github.com/r266-tech/wechat-local-mcp",
   "license": "MIT",
