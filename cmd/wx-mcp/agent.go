@@ -234,10 +234,37 @@ func resolveTalkerForCache(db *wcdb.DB, a map[string]any, required bool) (string
 	if len(cands) == 0 {
 		return "", fmt.Errorf("chat %q not found; call resolve_chat first to inspect candidates", raw)
 	}
+	if ambiguousChatCandidates(cands) {
+		return "", fmt.Errorf("chat %q is ambiguous; call resolve_chat and pass one returned username/talker. candidates: %s", raw, formatChatCandidates(cands, 3))
+	}
 	if strings.Contains(cands[0].Match, "_exact") {
 		return cands[0].Username, nil
 	}
 	return cands[0].Username, nil
+}
+
+func ambiguousChatCandidates(cands []chatCandidate) bool {
+	if len(cands) < 2 {
+		return false
+	}
+	topExact := strings.Contains(cands[0].Match, "_exact")
+	secondExact := strings.Contains(cands[1].Match, "_exact")
+	if topExact {
+		return secondExact
+	}
+	return true
+}
+
+func formatChatCandidates(cands []chatCandidate, limit int) string {
+	if limit <= 0 || limit > len(cands) {
+		limit = len(cands)
+	}
+	parts := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		c := cands[i]
+		parts = append(parts, fmt.Sprintf("%s(%s,%s,%s)", c.Username, c.DisplayName, c.ChatType, c.Match))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func decorateSessionRows(rows []wcdb.Row, typeFilter string) []wcdb.Row {

@@ -2,14 +2,25 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	"crypto/aes"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -74,11 +85,15 @@ type contentBlock struct {
 // ──────────────────── server state ────────────────────
 
 type server struct {
-	cfg            *config.Config
-	wcdbPath       string
-	ok             bool
-	keyRefreshMu   sync.Mutex
-	keyRefreshLast map[string]time.Time
+	cfg                       *config.Config
+	wcdbPath                  string
+	ok                        bool
+	keyRefreshMu              sync.Mutex
+	keyRefreshLast            map[string]time.Time
+	readableImageIndexMu      sync.Mutex
+	readableImageIndexRoot    string
+	readableImageIndexBuiltAt time.Time
+	readableImageIndex        map[string][]readableImageCandidate
 }
 
 // findWCDB locates the platform WCDB dynamic library.
@@ -412,6 +427,7 @@ func (s *server) callTool(p toolCallParams) toolResult {
 		"resolve_chat":           s.toolResolveChat,
 		"contacts":               s.toolContacts,
 		"messages":               s.toolMessages,
+		"chat_timeline":          s.toolChatTimeline,
 		"media_resources":        s.toolMediaResources,
 		"group_members":          s.toolGroupMembers,
 		"sns":                    s.toolSns,
@@ -614,15 +630,231 @@ func (s *server) toolContacts(a map[string]any) (any, error) {
 }
 
 func (s *server) toolMessages(a map[string]any) (any, error) {
-	rows, err := s.queryLiveMessages(a, "sort_seq DESC, local_id DESC")
+	rows, _, _, err := s.loadMessageRowsForOutput(a)
 	if err != nil {
 		return nil, err
+	}
+	view, err := messagesView(a)
+	if err != nil {
+		return nil, err
+	}
+	if view == "agent" {
+		return agentMessages(rows, includeDebugOutput(a)), nil
 	}
 	mode, err := fieldsMode(a)
 	if err != nil {
 		return nil, err
 	}
-	return liteMessages(rows, mode), nil
+	return liteMessages(rows, mode, includeDebugOutput(a)), nil
+}
+
+func (s *server) toolChatTimeline(a map[string]any) (any, error) {
+	args := chatTimelineMessageArgs(a)
+	rows, queryOrder, displayOrder, err := s.loadMessageRowsForOutput(args)
+	if err != nil {
+		return nil, err
+	}
+	msgs := agentMessages(rows, includeDebugOutput(args))
+	return chatTimelineEnvelope(args, rows, msgs, queryOrder, displayOrder), nil
+}
+
+func (s *server) loadMessageRowsForOutput(a map[string]any) ([]wcdb.Row, string, string, error) {
+	queryOrder, err := messageQueryOrderSQL(a)
+	if err != nil {
+		return nil, "", "", err
+	}
+	rows, err := s.queryLiveMessages(a, queryOrder)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if includeMediaPathsForMessages(a) {
+		if err := s.enrichMessageMediaResources(rows); err != nil {
+			return nil, "", "", err
+		}
+	}
+	displayOrder, err := messagesDisplayOrder(a)
+	if err != nil {
+		return nil, "", "", err
+	}
+	applyMessageDisplayOrder(rows, displayOrder)
+	return rows, queryOrder, displayOrder, nil
+}
+
+func chatTimelineMessageArgs(a map[string]any) map[string]any {
+	args := copyToolArgs(a)
+	args["view"] = "agent"
+	if _, ok := args["order"]; !ok {
+		args["order"] = "desc"
+	}
+	if _, ok := args["display_order"]; !ok {
+		args["display_order"] = "asc"
+	}
+	if include, ok := args["include_images"].(bool); ok {
+		args["include_media_paths"] = include
+		delete(args, "include_images")
+	}
+	return args
+}
+
+func copyToolArgs(a map[string]any) map[string]any {
+	out := make(map[string]any, len(a)+4)
+	for k, v := range a {
+		out[k] = v
+	}
+	return out
+}
+
+func chatTimelineEnvelope(args map[string]any, rows []wcdb.Row, messages []map[string]any, queryOrder, displayOrder string) map[string]any {
+	return compactMap(map[string]any{
+		"query":     chatTimelineQueryMeta(args, rows, queryOrder, displayOrder, len(messages)),
+		"freshness": chatTimelineFreshnessMeta(args, rows),
+		"messages":  messages,
+	})
+}
+
+func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, queryOrder, displayOrder string, returned int) map[string]any {
+	meta := compactMap(map[string]any{
+		"chat":          getStr(args, "chat"),
+		"talker":        firstNonEmpty(rowString(firstRow(rows), "talker"), getStr(args, "talker")),
+		"display_name":  rowString(firstRow(rows), "talker_display_name"),
+		"limit":         getInt(args, "limit", 50),
+		"offset":        getInt(args, "offset", 0),
+		"order":         normalizeOrderArg(getStr(args, "order")),
+		"display_order": displayOrder,
+		"after":         getStr(args, "after"),
+		"before":        getStr(args, "before"),
+		"keyword":       getStr(args, "keyword"),
+		"type":          firstNonEmpty(getStr(args, "kind_name"), getStr(args, "type")),
+		"sender":        getStr(args, "sender"),
+		"returned":      returned,
+	})
+	if meta["order"] == "" {
+		meta["order"] = "desc"
+	}
+	if meta["display_order"] == "" {
+		meta["display_order"] = "query"
+	}
+	meta["returned"] = returned
+	if oldest, newest := messageTimeBounds(rows); oldest != "" || newest != "" {
+		meta["oldest_time"] = oldest
+		meta["newest_time"] = newest
+	}
+	_ = queryOrder
+	return meta
+}
+
+func chatTimelineFreshnessMeta(args map[string]any, rows []wcdb.Row) map[string]any {
+	meta := compactMap(map[string]any{
+		"message_source":      "live_message_db",
+		"metadata_cache_role": metadataCacheRole(args),
+		"last_message_time":   newestMessageTime(rows),
+	})
+	return meta
+}
+
+func metadataCacheRole(args map[string]any) string {
+	chat := strings.TrimSpace(getStr(args, "chat"))
+	sender := strings.TrimSpace(getStr(args, "sender"))
+	if (chat != "" && !looksLikeRawChatID(chat)) || (sender != "" && !looksLikeRawChatID(sender)) {
+		return "name_resolution_only"
+	}
+	return ""
+}
+
+func firstRow(rows []wcdb.Row) wcdb.Row {
+	if len(rows) == 0 {
+		return nil
+	}
+	return rows[0]
+}
+
+func messageTimeBounds(rows []wcdb.Row) (string, string) {
+	var minTS, maxTS int64
+	for _, r := range rows {
+		ts := rowInt64(r, "create_time")
+		if ts == 0 {
+			continue
+		}
+		if minTS == 0 || ts < minTS {
+			minTS = ts
+		}
+		if maxTS == 0 || ts > maxTS {
+			maxTS = ts
+		}
+	}
+	return formatUnixLocal(minTS), formatUnixLocal(maxTS)
+}
+
+func newestMessageTime(rows []wcdb.Row) string {
+	_, newest := messageTimeBounds(rows)
+	return newest
+}
+
+func formatUnixLocal(ts int64) string {
+	if ts == 0 {
+		return ""
+	}
+	return time.Unix(ts, 0).Format("2006-01-02 15:04:05")
+}
+
+func messageQueryOrderSQL(a map[string]any) (string, error) {
+	switch normalizeOrderArg(getStr(a, "order")) {
+	case "", "desc":
+		return "sort_seq DESC, local_id DESC", nil
+	case "asc":
+		return "sort_seq ASC, local_id ASC", nil
+	default:
+		return "", fmt.Errorf("invalid order=%q: must be \"desc\" or \"asc\"", getStr(a, "order"))
+	}
+}
+
+func messagesDisplayOrder(a map[string]any) (string, error) {
+	switch normalizeOrderArg(getStr(a, "display_order")) {
+	case "", "query":
+		return "query", nil
+	case "desc":
+		return "desc", nil
+	case "asc":
+		return "asc", nil
+	default:
+		return "", fmt.Errorf("invalid display_order=%q: must be \"query\", \"desc\", or \"asc\"", getStr(a, "display_order"))
+	}
+}
+
+func normalizeOrderArg(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.ReplaceAll(s, "-", "_")
+	switch s {
+	case "newest", "newest_first", "latest", "latest_first":
+		return "desc"
+	case "oldest", "oldest_first", "chronological":
+		return "asc"
+	default:
+		return s
+	}
+}
+
+func applyMessageDisplayOrder(rows []wcdb.Row, order string) {
+	if order == "" || order == "query" || len(rows) < 2 {
+		return
+	}
+	asc := order == "asc"
+	sort.SliceStable(rows, func(i, j int) bool {
+		ti := rowInt64(rows[i], "create_time")
+		tj := rowInt64(rows[j], "create_time")
+		if ti != tj {
+			if asc {
+				return ti < tj
+			}
+			return ti > tj
+		}
+		li := rowInt64(rows[i], "local_id")
+		lj := rowInt64(rows[j], "local_id")
+		if asc {
+			return li < lj
+		}
+		return li > lj
+	})
 }
 
 func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, error) {
@@ -781,6 +1013,9 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		}
 	}
 	for _, r := range rows {
+		if sid := rowInt64(r, "server_id"); sid != 0 {
+			r["server_id_str"] = strconv.FormatInt(sid, 10)
+		}
 		delete(r, "real_sender_id")
 		delete(r, "sort_seq")
 		delete(r, "status")
@@ -837,18 +1072,37 @@ func sliceRows(rows []wcdb.Row, offset, limit int) []wcdb.Row {
 // mode=lite. Keeps the 8 fields that matter for human-readable summarization
 // (typical 100-row response: ~250KB full → ~12KB lite, ~95% reduction).
 // mode=full passes through unchanged.
-func liteMessages(rows []wcdb.Row, mode string) []wcdb.Row {
+func liteMessages(rows []wcdb.Row, mode string, includeDebugOpt ...bool) []wcdb.Row {
 	if mode != "lite" {
 		return rows
 	}
+	includeDebug := false
+	if len(includeDebugOpt) > 0 {
+		includeDebug = includeDebugOpt[0]
+	}
 	keep := map[string]bool{
 		"talker": true, "talker_display_name": true, "chat_type": true,
-		"local_id": true, "server_id": true,
+		"local_id": true, "server_id": true, "server_id_str": true,
 		"create_time": true, "create_time_human": true,
 		"sender_wxid": true, "sender_display_name": true, "is_from_me": true,
 		"base_kind": true, "kind_name": true, "content_summary": true,
+		"id": true, "display": true, "images": true, "videos": true, "files": true,
+		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "quote": true,
+		"transfer": true, "red_packet": true, "location": true, "card": true,
+		"voice": true, "video": true, "sticker": true, "solitaire": true, "announcement": true, "pat": true,
+		"warnings": true,
+	}
+	if includeDebug {
+		for _, k := range []string{
+			"media_local_paths", "media_local_path_uris",
+			"decoded_media_local_paths", "decoded_media_local_path_uris",
+			"media_resources", "media_read_hints",
+		} {
+			keep[k] = true
+		}
 	}
 	for _, r := range rows {
+		attachDisplayReadyFields(r)
 		for k := range r {
 			if !keep[k] {
 				delete(r, k)
@@ -856,6 +1110,1768 @@ func liteMessages(rows []wcdb.Row, mode string) []wcdb.Row {
 		}
 	}
 	return rows
+}
+
+func attachDisplayReadyFields(r wcdb.Row) {
+	msg := agentMessage(r)
+	if id, ok := msg["id"]; ok {
+		r["id"] = id
+	}
+	if images, ok := msg["images"]; ok {
+		r["images"] = images
+	}
+	if videos, ok := msg["videos"]; ok {
+		r["videos"] = videos
+	}
+	if files, ok := msg["files"]; ok {
+		r["files"] = files
+	}
+	if quote, ok := msg["quote"]; ok {
+		r["quote"] = quote
+	}
+	for _, key := range []string{"link", "music", "miniprogram", "forward_chat", "transfer", "red_packet", "location", "card", "voice", "video", "sticker", "solitaire", "announcement", "pat"} {
+		if v, ok := msg[key]; ok {
+			r[key] = v
+		}
+	}
+	if warnings, ok := msg["warnings"]; ok {
+		r["warnings"] = warnings
+	}
+	if display := agentDisplayObject(msg); len(display) > 0 {
+		r["display"] = display
+	}
+}
+
+func messagesView(a map[string]any) (string, error) {
+	view := getStr(a, "view")
+	if view == "" || view == "default" {
+		return "default", nil
+	}
+	if view != "agent" {
+		return "", fmt.Errorf("invalid view=%q: must be \"default\" or \"agent\"", view)
+	}
+	return view, nil
+}
+
+func agentMessages(rows []wcdb.Row, includeDebugOpt ...bool) []map[string]any {
+	includeDebug := false
+	if len(includeDebugOpt) > 0 {
+		includeDebug = includeDebugOpt[0]
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, agentMessage(r, includeDebug))
+	}
+	return out
+}
+
+func agentMessage(r wcdb.Row, includeDebugOpt ...bool) map[string]any {
+	includeDebug := false
+	if len(includeDebugOpt) > 0 {
+		includeDebug = includeDebugOpt[0]
+	}
+	out := map[string]any{
+		"id":          agentMessageID(r),
+		"time":        agentMessageTime(r),
+		"sender":      agentMessageSender(r),
+		"sender_wxid": rowString(r, "sender_wxid"),
+		"is_from_me":  r["is_from_me"],
+		"kind":        rowString(r, "kind_name"),
+		"text":        agentMessageText(r),
+	}
+	if warnings := agentMessageWarnings(r); len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	if images, warnings := agentImageRefs(r, false); len(images) > 0 || len(warnings) > 0 {
+		if len(images) > 0 {
+			out["images"] = images
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+		}
+	}
+	if videos, warnings := agentVideoRefs(r, false); len(videos) > 0 || len(warnings) > 0 {
+		if len(videos) > 0 {
+			out["videos"] = videos
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+		}
+	}
+	if files, warnings := agentFileRefs(r, false); len(files) > 0 || len(warnings) > 0 {
+		if len(files) > 0 {
+			out["files"] = files
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+		}
+	}
+	if quote := agentQuote(r); len(quote) > 0 {
+		out["quote"] = quote
+	}
+	attachAgentStructuredPayloads(out, r)
+	if includeDebug {
+		if debug := agentDebugFields(r); len(debug) > 0 {
+			out["debug"] = debug
+		}
+	}
+	return compactMap(out)
+}
+
+func agentMessageID(r wcdb.Row) map[string]any {
+	serverIDStr := rowString(r, "server_id_str")
+	if serverIDStr == "" {
+		if sid := rowInt64(r, "server_id"); sid != 0 {
+			serverIDStr = strconv.FormatInt(sid, 10)
+		}
+	}
+	return compactMap(map[string]any{
+		"talker":        rowString(r, "talker"),
+		"local_id":      rowInt64(r, "local_id"),
+		"server_id_str": serverIDStr,
+	})
+}
+
+func agentDebugFields(r wcdb.Row) map[string]any {
+	out := compactMap(map[string]any{
+		"local_id":         r["local_id"],
+		"server_id":        r["server_id"],
+		"server_id_str":    r["server_id_str"],
+		"media_resources":  r["media_resources"],
+		"media_read_hints": r["media_read_hints"],
+	})
+	return out
+}
+
+func agentDisplayObject(msg map[string]any) map[string]any {
+	var render []map[string]any
+	for _, img := range mapSliceAny(msg["images"]) {
+		item := copyAgentMediaRef(img)
+		item["type"] = "image"
+		render = append(render, compactMap(item))
+	}
+	for _, file := range mapSliceAny(msg["files"]) {
+		item := copyAgentMediaRef(file)
+		item["type"] = "file"
+		render = append(render, compactMap(item))
+	}
+	for _, video := range mapSliceAny(msg["videos"]) {
+		item := copyAgentMediaRef(video)
+		item["type"] = "video"
+		render = append(render, compactMap(item))
+	}
+	if link, ok := msg["link"].(map[string]any); ok {
+		item := compactMap(map[string]any{
+			"type":   "link",
+			"title":  link["title"],
+			"url":    link["url"],
+			"source": link["source"],
+		})
+		if len(item) > 1 {
+			render = append(render, item)
+		}
+	}
+	if mini, ok := msg["miniprogram"].(map[string]any); ok {
+		item := compactMap(map[string]any{
+			"type":  "miniprogram",
+			"title": mini["title"],
+			"app":   mini["app"],
+			"url":   mini["url"],
+		})
+		if len(item) > 1 {
+			render = append(render, item)
+		}
+	}
+	out := compactMap(map[string]any{
+		"speaker":      msg["sender"],
+		"display_text": msg["text"],
+	})
+	if len(render) > 0 {
+		out["render"] = render
+	}
+	return out
+}
+
+func copyAgentMediaRef(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"path", "name", "file_size", "file_ext"} {
+		if v, ok := in[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func agentMessageTime(r wcdb.Row) string {
+	if s := rowString(r, "create_time_human"); s != "" {
+		return s
+	}
+	if ts := rowInt64(r, "create_time"); ts != 0 {
+		return time.Unix(ts, 0).Format("2006-01-02 15:04:05")
+	}
+	return ""
+}
+
+func agentMessageSender(r wcdb.Row) string {
+	sender := firstNonEmpty(rowString(r, "sender_display_name"), rowString(r, "sender_wxid"))
+	if sender != "" {
+		return sender
+	}
+	if rowString(r, "kind_name") == "system" {
+		return "系统"
+	}
+	return ""
+}
+
+func agentMessageText(r wcdb.Row) string {
+	if rowString(r, "kind_name") == "quote" {
+		if p, _ := r["message_content_parsed"].(map[string]any); p != nil {
+			if title := strings.TrimSpace(stringMapValue(p, "title")); title != "" {
+				return title
+			}
+		}
+	}
+	if rowString(r, "kind_name") == "voice" {
+		if text := voiceTranscriptTextFromHints(r, false); text != "" {
+			return "[语音] " + text
+		}
+	}
+	text := rowString(r, "content_summary")
+	if rowString(r, "kind_name") == "system" {
+		return agentSystemText(text)
+	}
+	return text
+}
+
+func agentMessageWarnings(r wcdb.Row) []string {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return nil
+	}
+	var warnings []string
+	if stringMapValue(p, "parse_error") != "" {
+		warnings = appendUniqueStrings(warnings, "message_parse_error")
+	}
+	if stringMapValue(p, "forward_items_parse_error") != "" {
+		warnings = appendUniqueStrings(warnings, "forward_items_parse_error")
+	}
+	return warnings
+}
+
+func agentSystemText(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.Contains(raw, "<sysmsg") {
+		return raw
+	}
+	type revokeMsg struct {
+		Content string `xml:"revokemsg>content"`
+	}
+	var parsed revokeMsg
+	if err := xml.Unmarshal([]byte(raw), &parsed); err == nil {
+		if content := strings.TrimSpace(parsed.Content); content != "" {
+			return content
+		}
+	}
+	return raw
+}
+
+func agentQuote(r wcdb.Row) map[string]any {
+	if rowString(r, "kind_name") != "quote" {
+		return nil
+	}
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return nil
+	}
+	refer, _ := p["refermsg"].(map[string]any)
+	if refer == nil {
+		return nil
+	}
+	refType := int64(0)
+	if n, ok := integerArgValue(refer["type"]); ok {
+		refType = n
+	}
+	refRaw, _ := refer["content_raw"].(string)
+	refParsed := mapAny(refer["content_parsed"])
+	refSubtype := int32(0)
+	if refType == 49 {
+		if n, ok := integerArgValue(refParsed["app_subtype"]); ok {
+			refSubtype = int32(n)
+		}
+	}
+	refKind := wxkind.Resolve(int32(refType), refSubtype)
+	refText := contentSummary(int32(refType), refSubtype, refRaw, refParsed)
+	refSender := firstNonEmpty(stringMapValue(refer, "displayname"), stringMapValue(refer, "fromusr"))
+	if stringMapValue(refer, "displayname") == "" && stringMapValue(refer, "fromusr") == rowString(r, "sender_wxid") {
+		refSender = agentMessageSender(r)
+	}
+	quote := map[string]any{
+		"sender": refSender,
+		"kind":   refKind,
+		"text":   refText,
+	}
+	if id := agentQuoteID(refer); len(id) > 0 {
+		quote["id"] = id
+	}
+	if ts, ok := integerArgValue(refer["createtime"]); ok && ts != 0 {
+		quote["time"] = time.Unix(ts, 0).Format("2006-01-02 15:04:05")
+	}
+	if refParsed != nil {
+		refHints := refer["media_read_hints"]
+		if refHints == nil {
+			refHints = r["media_read_hints"]
+		}
+		refRow := wcdb.Row{
+			"talker":                    firstNonEmpty(stringMapValue(refer, "chatusr"), rowString(r, "talker")),
+			"server_id_str":             stringMapValue(refer, "svrid"),
+			"base_kind":                 refType,
+			"subtype":                   refSubtype,
+			"kind_name":                 refKind,
+			"message_content_parsed":    refParsed,
+			"content_summary":           refText,
+			"message_content":           refRaw,
+			"sender_display_name":       refSender,
+			"create_time_human":         quote["time"],
+			"media_read_hints":          refHints,
+			"decoded_media_local_paths": r["decoded_media_local_paths"],
+		}
+		if ts, ok := integerArgValue(refer["createtime"]); ok {
+			refRow["create_time"] = ts
+		}
+		attachAgentStructuredPayloads(quote, refRow)
+		attachAgentReferencedMediaRefs(quote, refRow)
+	}
+	return compactMap(quote)
+}
+
+func agentQuoteID(refer map[string]any) map[string]any {
+	serverIDStr := stringMapValue(refer, "svrid")
+	if serverIDStr == "" {
+		if sid, ok := integerArgValue(refer["svrid"]); ok {
+			serverIDStr = strconv.FormatInt(sid, 10)
+		}
+	}
+	return compactMap(map[string]any{
+		"talker":        stringMapValue(refer, "chatusr"),
+		"server_id_str": serverIDStr,
+	})
+}
+
+func attachAgentReferencedMediaRefs(out map[string]any, r wcdb.Row) {
+	if images, warnings := agentImageRefs(r, true); len(images) > 0 || len(warnings) > 0 {
+		if len(images) > 0 {
+			out["images"] = images
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+		}
+	}
+	if videos, warnings := agentVideoRefs(r, true); len(videos) > 0 || len(warnings) > 0 {
+		if len(videos) > 0 {
+			out["videos"] = videos
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+		}
+	}
+	if files, warnings := agentFileRefs(r, true); len(files) > 0 || len(warnings) > 0 {
+		if len(files) > 0 {
+			out["files"] = files
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+		}
+	}
+}
+
+func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row) {
+	switch rowString(r, "kind_name") {
+	case "link", "channel_video":
+		if link := agentLinkPayload(r); len(link) > 0 {
+			out["link"] = link
+		}
+	case "music":
+		if music := agentMusicPayload(r); len(music) > 0 {
+			out["music"] = music
+		}
+	case "miniprogram":
+		if mini := agentMiniprogramPayload(r); len(mini) > 0 {
+			out["miniprogram"] = mini
+		}
+	case "forward_chat":
+		if forward := agentForwardChatPayload(r); len(forward) > 0 {
+			out["forward_chat"] = forward
+		}
+	case "transfer":
+		if transfer := agentTransferPayload(r); len(transfer) > 0 {
+			out["transfer"] = transfer
+		}
+	case "red_packet":
+		if redPacket := agentRedPacketPayload(r); len(redPacket) > 0 {
+			out["red_packet"] = redPacket
+		}
+	case "location":
+		if loc := agentLocationPayload(r); len(loc) > 0 {
+			out["location"] = loc
+		}
+	case "card":
+		if card := agentCardPayload(r); len(card) > 0 {
+			out["card"] = card
+		}
+	case "voice":
+		if voice := agentVoicePayload(r); len(voice) > 0 {
+			out["voice"] = voice
+		}
+	case "video":
+		if video := agentVideoPayload(r); len(video) > 0 {
+			out["video"] = video
+		}
+	case "sticker":
+		if sticker := agentStickerPayload(r); len(sticker) > 0 {
+			out["sticker"] = sticker
+		}
+	case "solitaire":
+		if solitaire := agentSolitairePayload(r); len(solitaire) > 0 {
+			out["solitaire"] = solitaire
+		}
+	case "announcement":
+		if announcement := agentSimplePayload(r, "announcement"); len(announcement) > 0 {
+			out["announcement"] = announcement
+		}
+	case "pat":
+		if pat := agentSimplePayload(r, "pat"); len(pat) > 0 {
+			out["pat"] = pat
+		}
+	case "app":
+		if app := agentAppPayload(r); len(app) > 0 {
+			out["app"] = app
+		}
+	}
+}
+
+func agentAppPayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return nil
+	}
+	return compactMap(map[string]any{
+		"title":           stringMapValue(p, "title"),
+		"description":     stringMapValue(p, "des"),
+		"url":             stringMapValue(p, "url"),
+		"source":          stringMapValue(p, "source_display_name"),
+		"source_username": stringMapValue(p, "source_username"),
+		"thumb_url":       stringMapValue(p, "thumb_url"),
+	})
+}
+
+func agentLinkPayload(r wcdb.Row) map[string]any {
+	return agentAppPayload(r)
+}
+
+func agentMusicPayload(r wcdb.Row) map[string]any {
+	p := agentAppPayload(r)
+	if len(p) == 0 {
+		return nil
+	}
+	return compactMap(map[string]any{
+		"title":     p["title"],
+		"artist":    p["description"],
+		"url":       p["url"],
+		"source":    p["source"],
+		"thumb_url": p["thumb_url"],
+	})
+}
+
+func agentMiniprogramPayload(r wcdb.Row) map[string]any {
+	p := agentAppPayload(r)
+	if len(p) == 0 {
+		return nil
+	}
+	if source, ok := p["source"].(string); ok && source != "" {
+		p["app"] = source
+	}
+	return p
+}
+
+func agentForwardChatPayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return nil
+	}
+	items := forwardItemsPayload(p["forward_items"], mapSliceAny(r["media_read_hints"]))
+	return compactMap(map[string]any{
+		"title":       stringMapValue(p, "title"),
+		"description": stringMapValue(p, "des"),
+		"item_count":  forwardItemCount(p["forward_items"]),
+		"items":       items,
+	})
+}
+
+func forwardItemCount(v any) int {
+	switch x := v.(type) {
+	case []wxparse.ForwardItem:
+		return len(x)
+	case []any:
+		return len(x)
+	default:
+		return 0
+	}
+}
+
+func forwardItemsPayload(v any, hints []map[string]any) []map[string]any {
+	return forwardItemsPayloadAt(v, nil, hints)
+}
+
+func forwardItemsPayloadAt(v any, prefix []int, hints []map[string]any) []map[string]any {
+	var out []map[string]any
+	switch x := v.(type) {
+	case []wxparse.ForwardItem:
+		for i, it := range x {
+			out = append(out, forwardItemPayload(it, appendForwardPath(prefix, i), hints))
+		}
+	case []any:
+		for i, raw := range x {
+			if m, ok := raw.(map[string]any); ok {
+				out = append(out, forwardMapItemPayload(m, appendForwardPath(prefix, i), hints))
+			}
+		}
+	}
+	return out
+}
+
+func forwardItemPayload(it wxparse.ForwardItem, path []int, hints []map[string]any) map[string]any {
+	kind := forwardDataTypeKind(it.DataType)
+	item := compactMap(map[string]any{
+		"kind":                 kind,
+		"sender":               it.SourceName,
+		"time":                 it.SourceTime,
+		"text":                 forwardItemText(kind, it.DataDesc),
+		"title":                forwardItemTitle(kind, it.DataTitle, it.DataDesc),
+		"description":          forwardItemDescription(kind, it.DataDesc),
+		"source_create_time":   it.SrcMsgCreateTime,
+		"source_local_id":      it.SrcMsgLocalID,
+		"source_server_id_str": it.FromNewMsgID,
+		"message_uuid":         it.MessageUUID,
+		"parse_error":          it.ParseError,
+	})
+	addForwardItemTypedPayload(item, kind, it, path, hints)
+	if it.ReferMsg != nil {
+		if quote := forwardReferMsgPayload(*it.ReferMsg); len(quote) > 0 {
+			item["quote"] = quote
+		}
+	}
+	if len(it.NestedItems) > 0 {
+		item["item_count"] = len(it.NestedItems)
+		item["items"] = forwardItemsPayloadAt(it.NestedItems, path, hints)
+	}
+	return item
+}
+
+func forwardMapItemPayload(m map[string]any, path []int, hints []map[string]any) map[string]any {
+	datatype := int(rowInt64(wcdb.Row(m), "datatype"))
+	kind := forwardDataTypeKind(datatype)
+	item := compactMap(map[string]any{
+		"kind":               kind,
+		"sender":             stringMapValue(m, "sourcename"),
+		"time":               stringMapValue(m, "sourcetime"),
+		"text":               forwardItemText(kind, stringMapValue(m, "datadesc")),
+		"title":              forwardItemTitle(kind, stringMapValue(m, "datatitle"), stringMapValue(m, "datadesc")),
+		"description":        forwardItemDescription(kind, stringMapValue(m, "datadesc")),
+		"source_create_time": m["src_msg_create_time"],
+		"source_local_id":    m["src_msg_localid"],
+	})
+	if nested := forwardItemsPayloadAt(m["nested_items"], path, hints); len(nested) > 0 {
+		item["item_count"] = len(nested)
+		item["items"] = nested
+	}
+	return item
+}
+
+func appendForwardPath(prefix []int, next int) []int {
+	out := make([]int, 0, len(prefix)+1)
+	out = append(out, prefix...)
+	out = append(out, next)
+	return out
+}
+
+func forwardItemText(kind, desc string) string {
+	if kind == "text" {
+		return desc
+	}
+	return ""
+}
+
+func forwardItemTitle(kind, title, desc string) string {
+	if kind == "text" {
+		return ""
+	}
+	return firstNonEmpty(title, desc)
+}
+
+func forwardItemDescription(kind, desc string) string {
+	if kind == "text" {
+		return ""
+	}
+	return desc
+}
+
+func addForwardItemTypedPayload(item map[string]any, kind string, it wxparse.ForwardItem, path []int, hints []map[string]any) {
+	switch kind {
+	case "image":
+		if images := forwardImageRefs(it, path, hints); len(images) > 0 {
+			item["images"] = images
+		}
+	case "video":
+		if videos := forwardVideoRefs(it, path, hints); len(videos) > 0 {
+			item["videos"] = videos
+		}
+	case "voice":
+		if voice := forwardVoicePayload(it); len(voice) > 0 {
+			item["voice"] = voice
+		}
+	case "file":
+		if file := forwardFilePayload(it); len(file) > 0 {
+			item["files"] = []map[string]any{file}
+		}
+	case "link":
+		if link := forwardLinkPayload(it); len(link) > 0 {
+			item["link"] = link
+		}
+	case "miniprogram":
+		if mini := forwardGenericAppPayload(it); len(mini) > 0 {
+			item["miniprogram"] = mini
+		}
+	case "music":
+		if music := forwardGenericAppPayload(it); len(music) > 0 {
+			item["music"] = music
+		}
+	case "location":
+		if loc := forwardGenericLocationPayload(it); len(loc) > 0 {
+			item["location"] = loc
+		}
+	case "card":
+		if card := forwardGenericCardPayload(it); len(card) > 0 {
+			item["card"] = card
+		}
+	case "red_packet":
+		if redPacket := forwardGenericRedPacketPayload(it); len(redPacket) > 0 {
+			item["red_packet"] = redPacket
+		}
+	}
+}
+
+func forwardImageRefs(it wxparse.ForwardItem, path []int, hints []map[string]any) []map[string]any {
+	if refs := forwardMediaRefsFromHints(path, hints, "image"); len(refs) > 0 {
+		return refs
+	}
+	return nil
+}
+
+func forwardVideoRefs(it wxparse.ForwardItem, path []int, hints []map[string]any) []map[string]any {
+	if refs := forwardMediaRefsFromHints(path, hints, "video"); len(refs) > 0 {
+		return refs
+	}
+	return nil
+}
+
+func forwardVoicePayload(it wxparse.ForwardItem) map[string]any {
+	return nil
+}
+
+func forwardFilePayload(it wxparse.ForwardItem) map[string]any {
+	return compactMap(map[string]any{
+		"name":      firstNonEmpty(it.DataTitle, it.DataDesc),
+		"file_ext":  it.DataFmt,
+		"file_size": it.DataSize,
+	})
+}
+
+func forwardLinkPayload(it wxparse.ForwardItem) map[string]any {
+	if it.Link == nil {
+		return nil
+	}
+	return compactMap(map[string]any{
+		"title":           firstNonEmpty(it.Link.Title, it.DataTitle, it.DataDesc),
+		"url":             it.Link.URL,
+		"source":          it.Link.SourceDisplayName,
+		"source_username": it.Link.SourceUsername,
+		"thumb_url":       it.Link.ThumbURL,
+	})
+}
+
+func forwardGenericAppPayload(it wxparse.ForwardItem) map[string]any {
+	out := compactMap(map[string]any{
+		"title":       firstNonEmpty(it.DataTitle, it.DataDesc),
+		"description": it.DataDesc,
+	})
+	if it.Link != nil {
+		if it.Link.SourceDisplayName != "" {
+			out["source"] = it.Link.SourceDisplayName
+		}
+		if it.Link.SourceUsername != "" {
+			out["source_username"] = it.Link.SourceUsername
+		}
+		if it.Link.URL != "" {
+			out["url"] = it.Link.URL
+		}
+		if it.Link.ThumbURL != "" {
+			out["thumb_url"] = it.Link.ThumbURL
+		}
+	}
+	return out
+}
+
+func forwardGenericLocationPayload(it wxparse.ForwardItem) map[string]any {
+	return compactMap(map[string]any{
+		"label":       firstNonEmpty(it.DataDesc, it.DataTitle),
+		"name":        it.DataTitle,
+		"description": it.DataDesc,
+	})
+}
+
+func forwardGenericCardPayload(it wxparse.ForwardItem) map[string]any {
+	return compactMap(map[string]any{
+		"display_name": firstNonEmpty(it.DataTitle, it.DataDesc),
+		"description":  it.DataDesc,
+	})
+}
+
+func forwardGenericRedPacketPayload(it wxparse.ForwardItem) map[string]any {
+	return compactMap(map[string]any{
+		"title":       firstNonEmpty(it.DataTitle, it.DataDesc),
+		"description": it.DataDesc,
+	})
+}
+
+func forwardMediaRefsFromHints(path []int, hints []map[string]any, family string) []map[string]any {
+	key := forwardPathString(path)
+	var out []map[string]any
+	for _, h := range hints {
+		if rowString(wcdb.Row(h), "source") != "message_forward_item" || rowString(wcdb.Row(h), "forward_path") != key || !agentHintMatchesFamily(h, family) {
+			continue
+		}
+		row := wcdb.Row{"media_read_hints": []map[string]any{h}}
+		paths := appendUniqueStrings(stringSliceAny(h["direct_readable_local_paths"]), stringSliceAny(h["decoded_local_paths"])...)
+		for _, p := range stringSliceAny(h["local_paths"]) {
+			if directReadableMediaPath(family, p) {
+				paths = appendUniqueStrings(paths, p)
+			}
+		}
+		out = append(out, agentMediaRefsFromPaths(row, paths, false, family)...)
+	}
+	return out
+}
+
+func forwardReferMsgPayload(ref wxparse.ForwardReferMsg) map[string]any {
+	refType := int32(ref.Type)
+	parsed := mapAny(parseMessageContent(refType, 0, ref.Content, messageContentParseDepth))
+	refSubtype := int32(0)
+	if refType == 49 {
+		if n, ok := integerArgValue(parsed["app_subtype"]); ok {
+			refSubtype = int32(n)
+		}
+	}
+	kind := wxkind.Resolve(refType, refSubtype)
+	quote := compactMap(map[string]any{
+		"id": compactMap(map[string]any{
+			"server_id_str": ref.SvrID,
+		}),
+		"sender": ref.DisplayName,
+		"kind":   kind,
+		"text":   firstNonEmpty(ref.ReferDesc, contentSummary(refType, refSubtype, ref.Content, parsed)),
+	})
+	if parsed != nil {
+		refRow := wcdb.Row{
+			"kind_name":              kind,
+			"base_kind":              int64(refType),
+			"subtype":                int64(refSubtype),
+			"message_content":        ref.Content,
+			"message_content_parsed": parsed,
+			"content_summary":        contentSummary(refType, refSubtype, ref.Content, parsed),
+			"sender_display_name":    ref.DisplayName,
+		}
+		attachAgentStructuredPayloads(quote, refRow)
+	}
+	return quote
+}
+
+func forwardPathString(path []int) string {
+	parts := make([]string, 0, len(path))
+	for _, n := range path {
+		parts = append(parts, strconv.Itoa(n))
+	}
+	return strings.Join(parts, ".")
+}
+
+func forwardDataTypeKind(datatype int) string {
+	switch datatype {
+	case 1:
+		return "text"
+	case 2:
+		return "image"
+	case 3:
+		return "voice"
+	case 4:
+		return "video"
+	case 5:
+		return "link"
+	case 6:
+		return "location"
+	case 7:
+		return "music"
+	case 8:
+		return "file"
+	case 16:
+		return "card"
+	case 17:
+		return "forward_chat"
+	case 18:
+		return "miniprogram"
+	case 2001:
+		return "red_packet"
+	default:
+		if datatype == 0 {
+			return ""
+		}
+		return fmt.Sprintf("datatype_%d", datatype)
+	}
+}
+
+func agentTransferPayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	wcpay := mapAny(p["wcpayinfo"])
+	amount := stringMapValue(wcpay, "feedesc")
+	description := firstNonEmpty(stringMapValue(p, "des"), stringMapValue(wcpay, "description"))
+	memo := stringMapValue(wcpay, "pay_memo")
+	if amount == "" && description == "" && memo == "" {
+		if a, d, m, err := wxparse.TransferInfo(rowString(r, "message_content")); err == nil {
+			amount, description, memo = a, d, m
+		}
+	}
+	return compactMap(map[string]any{
+		"amount":       amount,
+		"description":  description,
+		"memo":         memo,
+		"pay_sub_type": wcpay["paysubtype"],
+	})
+}
+
+func agentRedPacketPayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	wcpay := mapAny(p["wcpayinfo"])
+	wishing := firstNonEmpty(stringMapValue(wcpay, "sendertitle"), stringMapValue(p, "title"))
+	sceneText := stringMapValue(wcpay, "scenetext")
+	if wishing == "" && sceneText == "" {
+		if w, s, err := wxparse.RedPacketInfo(rowString(r, "message_content")); err == nil {
+			wishing, sceneText = w, s
+		}
+	}
+	return compactMap(map[string]any{
+		"title":          wishing,
+		"scene":          sceneText,
+		"receiver_title": stringMapValue(wcpay, "receivertitle"),
+	})
+}
+
+func agentLocationPayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return nil
+	}
+	return compactMap(map[string]any{
+		"label":     stringMapValue(p, "label"),
+		"name":      stringMapValue(p, "poiname"),
+		"latitude":  p["latitude"],
+		"longitude": p["longitude"],
+		"scale":     p["scale"],
+	})
+}
+
+func agentCardPayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return agentSimplePayload(r, "card")
+	}
+	return compactMap(map[string]any{
+		"username":          stringMapValue(p, "username"),
+		"nickname":          stringMapValue(p, "nickname"),
+		"alias":             stringMapValue(p, "alias"),
+		"display_name":      firstNonEmpty(stringMapValue(p, "nickname"), stringMapValue(p, "username")),
+		"small_avatar_url":  stringMapValue(p, "small_head_img_url"),
+		"avatar_url":        stringMapValue(p, "big_head_img_url"),
+		"province":          stringMapValue(p, "province"),
+		"city":              stringMapValue(p, "city"),
+		"signature":         stringMapValue(p, "signature"),
+		"gender":            cardGenderName(p["sex"]),
+		"sex_code":          p["sex"],
+		"source_scene_code": p["scene"],
+	})
+}
+
+func cardGenderName(v any) string {
+	n, ok := integerArgValue(v)
+	if !ok {
+		return ""
+	}
+	switch n {
+	case 1:
+		return "male"
+	case 2:
+		return "female"
+	default:
+		return "unknown"
+	}
+}
+
+func agentStickerPayload(r wcdb.Row) map[string]any {
+	return nil
+}
+
+func agentSolitairePayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	text := firstNonEmpty(stringMapValue(p, "title"), rowString(r, "content_summary"))
+	entries := solitaireEntries(text)
+	return compactMap(map[string]any{
+		"text":        text,
+		"entries":     entries,
+		"entry_count": len(entries),
+	})
+}
+
+func solitaireEntries(text string) []string {
+	var entries []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		idx := strings.Index(line, ".")
+		if idx <= 0 {
+			idx = strings.Index(line, "、")
+		}
+		if idx <= 0 {
+			continue
+		}
+		prefix := strings.TrimSpace(line[:idx])
+		if _, err := strconv.Atoi(prefix); err != nil {
+			continue
+		}
+		if entry := strings.TrimSpace(line[idx+1:]); entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func agentSimplePayload(r wcdb.Row, kind string) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	out := compactMap(map[string]any{
+		"title":       stringMapValue(p, "title"),
+		"description": stringMapValue(p, "des"),
+		"text":        rowString(r, "content_summary"),
+	})
+	if len(out) == 0 && kind != "" && rowString(r, "content_summary") != "" {
+		out["text"] = rowString(r, "content_summary")
+	}
+	return out
+}
+
+func agentImageRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
+	paths, warnings := agentImagePaths(r, referenced)
+	return agentMediaRefsFromPaths(r, paths, referenced, "image"), warnings
+}
+
+func agentVideoRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
+	if !referenced {
+		switch rowString(r, "kind_name") {
+		case "video", "channel_video":
+		default:
+			return nil, nil
+		}
+	}
+	paths, warnings := agentVideoPaths(r, referenced)
+	return agentMediaRefsFromPaths(r, paths, referenced, "video"), warnings
+}
+
+func agentFileRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
+	paths, warnings := agentFilePaths(r, referenced)
+	refs := agentMediaRefsFromPaths(r, paths, referenced, "file")
+	if len(refs) == 0 && rowString(r, "kind_name") == "file" {
+		if meta := agentFileMetadata(r); len(meta) > 0 {
+			refs = append(refs, meta)
+		}
+	}
+	return dedupeAgentFileRefs(refs), warnings
+}
+
+func agentFileMetadata(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	appAttach := mapAny(p["app_attach"])
+	return compactMap(map[string]any{
+		"name":      firstNonEmpty(stringMapValue(p, "title"), stringMapValue(appAttach, "file_name")),
+		"file_size": appAttach["total_len"],
+		"file_ext":  stringMapValue(appAttach, "file_ext"),
+		"readable":  false,
+	})
+}
+
+func agentVoicePayload(r wcdb.Row) map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	out := compactMap(map[string]any{
+		"duration_ms": p["duration_ms"],
+	})
+	transcript, warnings := agentVoiceTranscript(r, false)
+	if len(transcript) == 0 && len(warnings) == 0 {
+		transcript, warnings = agentVoiceTranscript(r, true)
+	}
+	if len(transcript) > 0 {
+		out["transcript"] = transcript
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	return out
+}
+
+func agentVoiceRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
+	paths, warnings := agentMediaPathsByFamily(r, referenced, "voice", "voice_paths_not_direct_readable")
+	return agentMediaRefsFromPaths(r, paths, referenced, "voice"), warnings
+}
+
+func agentVoiceTranscript(r wcdb.Row, referenced bool) (map[string]any, []string) {
+	for _, h := range mapSliceAny(r["media_read_hints"]) {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintMatchesFamily(h, "voice") {
+			continue
+		}
+		transcript := agentVoiceTranscriptPayload(mapAny(h["transcript"]))
+		if len(transcript) == 0 {
+			continue
+		}
+		var warnings []string
+		switch stringMapValue(transcript, "status") {
+		case "ok":
+		case "no_speech":
+			warnings = appendUniqueStrings(warnings, "voice_transcription_no_speech")
+		case "failed":
+			warnings = appendUniqueStrings(warnings, "voice_transcription_failed")
+		default:
+			warnings = appendUniqueStrings(warnings, "voice_transcription_unavailable")
+		}
+		return transcript, warnings
+	}
+	return nil, nil
+}
+
+func agentVoiceTranscriptPayload(t map[string]any) map[string]any {
+	if len(t) == 0 {
+		return nil
+	}
+	return compactMap(map[string]any{
+		"status":   stringMapValue(t, "status"),
+		"text":     stringMapValue(t, "text"),
+		"engine":   stringMapValue(t, "engine"),
+		"model":    stringMapValue(t, "model"),
+		"language": stringMapValue(t, "language"),
+	})
+}
+
+func voiceTranscriptTextFromHints(r wcdb.Row, referenced bool) string {
+	transcript, _ := agentVoiceTranscript(r, referenced)
+	if stringMapValue(transcript, "status") != "ok" {
+		return ""
+	}
+	return stringMapValue(transcript, "text")
+}
+
+func agentVideoPayload(r wcdb.Row) map[string]any {
+	out := agentSimplePayload(r, "video")
+	if covers, warnings := agentVideoCoverRefs(r, false); len(covers) > 0 || len(warnings) > 0 {
+		if len(covers) > 0 {
+			out["cover_images"] = covers
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = warnings
+		}
+	}
+	return out
+}
+
+func agentVideoCoverRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
+	paths, warnings := agentMediaPathsByFamily(r, referenced, "cover", "video_cover_paths_not_direct_readable")
+	return agentMediaRefsFromPaths(r, paths, referenced, "cover"), warnings
+}
+
+func agentFilePaths(r wcdb.Row, referenced bool) ([]string, []string) {
+	hints := mapSliceAny(r["media_read_hints"])
+	direct, local := agentFilePathsFromHints(hints, referenced)
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return local[:1], []string{"file_paths_not_direct_readable"}
+	}
+	if referenced {
+		return nil, nil
+	}
+	if rowString(r, "kind_name") != "file" {
+		return nil, nil
+	}
+	for _, p := range stringSliceAny(r["media_local_paths"]) {
+		if directReadableMediaPath("file", p) {
+			direct = appendUniqueStrings(direct, p)
+		} else {
+			local = appendUniqueStrings(local, p)
+		}
+	}
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return local[:1], []string{"file_paths_not_direct_readable"}
+	}
+	return nil, nil
+}
+
+func agentFilePathsFromHints(hints []map[string]any, referenced bool) ([]string, []string) {
+	var direct []string
+	var local []string
+	for _, h := range hints {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintMatchesFamily(h, "file") {
+			continue
+		}
+		for _, p := range stringSliceAny(h["direct_readable_local_paths"]) {
+			if directReadableMediaPath("file", p) {
+				direct = appendUniqueStrings(direct, p)
+			} else {
+				local = appendUniqueStrings(local, p)
+			}
+		}
+		for _, p := range stringSliceAny(h["local_paths"]) {
+			if directReadableMediaPath("file", p) {
+				direct = appendUniqueStrings(direct, p)
+			} else {
+				local = appendUniqueStrings(local, p)
+			}
+		}
+	}
+	return direct, local
+}
+
+func agentMediaPathsByFamily(r wcdb.Row, referenced bool, family, unreadableWarning string) ([]string, []string) {
+	hints := mapSliceAny(r["media_read_hints"])
+	var direct []string
+	var local []string
+	for _, h := range hints {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintMatchesFamily(h, family) {
+			continue
+		}
+		for _, p := range stringSliceAny(h["direct_readable_local_paths"]) {
+			if directReadableMediaPath(family, p) {
+				direct = appendUniqueStrings(direct, p)
+			} else {
+				local = appendUniqueStrings(local, p)
+			}
+		}
+		for _, p := range stringSliceAny(h["local_paths"]) {
+			if directReadableMediaPath(family, p) {
+				direct = appendUniqueStrings(direct, p)
+			} else {
+				local = appendUniqueStrings(local, p)
+			}
+		}
+	}
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return local[:1], []string{unreadableWarning}
+	}
+	if referenced {
+		return nil, nil
+	}
+	for _, p := range stringSliceAny(r["media_local_paths"]) {
+		if directReadableMediaPath(family, p) {
+			direct = appendUniqueStrings(direct, p)
+		} else {
+			local = appendUniqueStrings(local, p)
+		}
+	}
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return local[:1], []string{unreadableWarning}
+	}
+	return nil, nil
+}
+
+func agentMediaRefsFromPaths(r wcdb.Row, paths []string, referenced bool, family string) []map[string]any {
+	out := make([]map[string]any, 0, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		detail := agentMediaPathDetail(r, p, referenced, family)
+		ref := map[string]any{
+			"path": p,
+		}
+		if family == "file" {
+			ref["name"] = agentFileName(r, p)
+			for _, k := range []string{"file_size", "file_ext"} {
+				if v, ok := detail[k]; ok {
+					ref[k] = v
+				}
+			}
+		}
+		out = append(out, compactMap(ref))
+	}
+	return out
+}
+
+func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
+	if len(refs) <= 1 {
+		return refs
+	}
+	var out []map[string]any
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		if ref["name"] != nil || ref["file_size"] != nil {
+			key := fmt.Sprintf("%v\x00%v", ref["name"], ref["file_size"])
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
+func agentMediaPathDetail(r wcdb.Row, path string, referenced bool, family string) map[string]any {
+	for _, h := range mapSliceAny(r["media_read_hints"]) {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintMatchesFamily(h, family) {
+			continue
+		}
+		for _, d := range mapSliceAny(h["local_path_details"]) {
+			if rowString(wcdb.Row(d), "path") == path || rowString(wcdb.Row(d), "uri") == localFileURI(path) {
+				return d
+			}
+		}
+	}
+	return nil
+}
+
+func agentFileName(r wcdb.Row, path string) string {
+	for _, res := range mapSliceAny(r["media_resources"]) {
+		if rowString(wcdb.Row(res), "resource_family") != "file" {
+			continue
+		}
+		if name := rowString(wcdb.Row(res), "file_name"); name != "" {
+			return name
+		}
+	}
+	return filepath.Base(path)
+}
+
+func agentImagePaths(r wcdb.Row, referenced bool) ([]string, []string) {
+	if !referenced && rowString(r, "kind_name") != "image" {
+		return nil, nil
+	}
+	hints := mapSliceAny(r["media_read_hints"])
+	direct, decoded, local, warnings := agentImagePathsFromHints(hints, referenced)
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(decoded) > 0 {
+		return decoded, nil
+	}
+	if len(local) > 0 {
+		warnings = appendUniqueStrings(warnings, "image_paths_not_direct_readable")
+		return nil, warnings
+	}
+	if len(warnings) > 0 {
+		return nil, warnings
+	}
+	if referenced {
+		return nil, nil
+	}
+	direct = appendUniqueStrings(direct, stringSliceAny(r["decoded_media_local_paths"])...)
+	for _, p := range stringSliceAny(r["media_local_paths"]) {
+		if directReadableMediaPath("image", p) {
+			direct = appendUniqueStrings(direct, p)
+		} else {
+			local = appendUniqueStrings(local, p)
+		}
+	}
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return nil, []string{"image_paths_not_direct_readable"}
+	}
+	return nil, nil
+}
+
+func agentVideoPaths(r wcdb.Row, referenced bool) ([]string, []string) {
+	hints := mapSliceAny(r["media_read_hints"])
+	var direct []string
+	var local []string
+	for _, h := range hints {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintMatchesFamily(h, "video") {
+			continue
+		}
+		for _, p := range stringSliceAny(h["direct_readable_local_paths"]) {
+			if directVideoFilePath(p) {
+				direct = appendUniqueStrings(direct, p)
+			}
+		}
+		for _, p := range stringSliceAny(h["local_paths"]) {
+			if directVideoFilePath(p) {
+				direct = appendUniqueStrings(direct, p)
+			} else if strings.ToLower(filepath.Ext(p)) == ".dat" {
+				local = appendUniqueStrings(local, p)
+			}
+		}
+	}
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return nil, []string{"video_paths_not_direct_readable"}
+	}
+	if referenced {
+		return nil, nil
+	}
+	for _, p := range stringSliceAny(r["media_local_paths"]) {
+		if directVideoFilePath(p) {
+			direct = appendUniqueStrings(direct, p)
+		} else if strings.ToLower(filepath.Ext(p)) == ".dat" {
+			local = appendUniqueStrings(local, p)
+		}
+	}
+	if len(direct) > 0 {
+		return direct, nil
+	}
+	if len(local) > 0 {
+		return nil, []string{"video_paths_not_direct_readable"}
+	}
+	return nil, nil
+}
+
+func agentImagePathsFromHints(hints []map[string]any, referenced bool) ([]string, []string, []string, []string) {
+	var direct []string
+	var decoded []string
+	var local []string
+	var warnings []string
+	var sawImage bool
+	var sawCDN bool
+	var sawNeedsKey bool
+	for _, h := range hints {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintIsImage(h) {
+			continue
+		}
+		sawImage = true
+		if rowString(wcdb.Row(h), "address_type") == "wechat_cdn" {
+			sawCDN = true
+		}
+		direct = appendUniqueStrings(direct, stringSliceAny(h["direct_readable_local_paths"])...)
+		decoded = appendUniqueStrings(decoded, stringSliceAny(h["decoded_local_paths"])...)
+		for _, p := range stringSliceAny(h["local_paths"]) {
+			if directReadableMediaPath("image", p) {
+				direct = appendUniqueStrings(direct, p)
+			} else {
+				local = appendUniqueStrings(local, p)
+			}
+		}
+		for _, d := range mapSliceAny(h["local_path_details"]) {
+			if rowString(wcdb.Row(d), "decode_status") == "needs_image_key" {
+				sawNeedsKey = true
+			}
+		}
+	}
+	if len(direct) == 0 && len(decoded) == 0 {
+		if sawNeedsKey {
+			warnings = appendUniqueStrings(warnings, "image_decode_needs_image_key")
+		}
+		if sawImage && sawCDN && len(local) == 0 {
+			warnings = appendUniqueStrings(warnings, "image_available_only_as_wechat_cdn")
+		}
+	}
+	return direct, decoded, local, warnings
+}
+
+func agentHintMatchesReferenced(h map[string]any, referenced bool) bool {
+	row := wcdb.Row(h)
+	isReferenced := rowString(row, "message_role") == "referenced_message" || rowString(row, "source") == "message_refermsg"
+	return isReferenced == referenced
+}
+
+func agentHintIsImage(h map[string]any) bool {
+	return agentHintMatchesFamily(h, "image") || agentHintMatchesFamily(h, "cover")
+}
+
+func agentHintMatchesFamily(h map[string]any, want string) bool {
+	family := rowString(wcdb.Row(h), "resource_family")
+	if family == want {
+		return true
+	}
+	if want == "image" && family == "cover" {
+		return true
+	}
+	for _, got := range stringSliceAny(h["resource_families"]) {
+		if got == want || (want == "image" && got == "cover") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) enrichMessageMediaResources(rows []wcdb.Row) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	byTalker := map[string][]int64{}
+	for _, r := range rows {
+		if !messageMayHaveMedia(rowInt64(r, "base_kind"), rowString(r, "kind_name")) {
+			continue
+		}
+		talker := rowString(r, "talker")
+		localID := rowInt64(r, "local_id")
+		if talker == "" || localID == 0 {
+			continue
+		}
+		byTalker[talker] = append(byTalker[talker], localID)
+	}
+	if len(byTalker) == 0 {
+		s.attachMediaReadHintsToMessages(rows)
+		return nil
+	}
+
+	db, err := s.openDB("message", "message_resource.db")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	var resourceRows []wcdb.Row
+	for talker, ids := range byTalker {
+		ids = uniqueInt64s(ids)
+		for start := 0; start < len(ids); start += 500 {
+			end := start + 500
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[start:end]
+			ph := make([]string, len(chunk))
+			args := make([]any, 0, len(chunk)+1)
+			args = append(args, talker)
+			for i, id := range chunk {
+				ph[i] = "?"
+				args = append(args, id)
+			}
+			q := fmt.Sprintf(`WITH filtered AS (
+				SELECT MAX(i.message_id) AS message_id, c.user_name AS talker,
+					i.message_local_type, i.message_create_time, i.message_local_id, i.message_svr_id,
+					i.message_origin_source, i.packed_info AS message_packed_info
+				FROM MessageResourceInfo i
+				LEFT JOIN ChatName2Id c ON c.rowid = i.chat_id
+				WHERE c.user_name = ? AND i.message_local_id IN (%s)
+				GROUP BY c.user_name, i.message_local_type, i.message_create_time,
+					i.message_local_id, i.message_svr_id, i.message_origin_source, i.packed_info
+			)
+			SELECT f.talker, f.message_local_type, f.message_create_time, f.message_local_id,
+				f.message_svr_id, f.message_origin_source, f.message_packed_info,
+				d.resource_id, d.type AS resource_type_raw, d.size AS resource_size,
+				d.create_time AS resource_create_time, d.access_time AS resource_access_time,
+				d.status AS resource_status, d.data_index AS resource_data_index,
+				d.packed_info AS resource_packed_info
+			FROM filtered f
+			JOIN MessageResourceDetail d ON d.message_id = f.message_id
+			ORDER BY f.message_create_time DESC, f.message_local_id DESC, d.resource_id ASC`, strings.Join(ph, ","))
+			rows, err := db.Query(q, args...)
+			if err != nil {
+				return err
+			}
+			resourceRows = append(resourceRows, rows...)
+		}
+	}
+	s.attachMediaResourceRowsToMessages(rows, resourceRows)
+	s.attachMediaReadHintsToMessages(rows)
+	return nil
+}
+
+func messageMayHaveMedia(baseKind int64, kindName string) bool {
+	switch baseKind {
+	case 3, 34, 43, 47:
+		return true
+	case 49:
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(kindName)) {
+	case "image", "voice", "video", "file", "sticker", "forward_chat", "miniprogram", "channel_video":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *server) attachMediaResourceRowsToMessages(messages []wcdb.Row, resourceRows []wcdb.Row) {
+	if len(messages) == 0 || len(resourceRows) == 0 {
+		return
+	}
+	type mediaBundle struct {
+		resources     []map[string]any
+		hintResources []map[string]any
+		paths         []string
+		pathURIs      []string
+		decodedPaths  []string
+		decodedURIs   []string
+	}
+	messageByKey := map[string]wcdb.Row{}
+	for _, r := range messages {
+		if key := mediaMessageKey(rowString(r, "talker"), rowInt64(r, "local_id"), rowInt64(r, "server_id"), rowInt64(r, "create_time")); key != "" {
+			messageByKey[key] = r
+		}
+	}
+	byMessage := map[string]*mediaBundle{}
+	for _, r := range resourceRows {
+		key := mediaMessageKey(rowString(r, "talker"), rowInt64(r, "message_local_id"), rowInt64(r, "message_svr_id"), rowInt64(r, "message_create_time"))
+		if key == "" {
+			continue
+		}
+		bundle := byMessage[key]
+		if bundle == nil {
+			bundle = &mediaBundle{}
+			byMessage[key] = bundle
+		}
+		fullRes := s.mediaResourceFromRow(r, true)
+		s.attachReadableImageMatchesFromMessage(fullRes, messageByKey[key])
+		bundle.hintResources = append(bundle.hintResources, fullRes)
+		bundle.resources = append(bundle.resources, compactMessageMediaResource(fullRes))
+		if paths, ok := fullRes["local_paths"].([]string); ok {
+			bundle.paths = appendUniqueStrings(bundle.paths, paths...)
+		}
+		if uris, ok := fullRes["local_path_uris"].([]string); ok {
+			bundle.pathURIs = appendUniqueStrings(bundle.pathURIs, uris...)
+		}
+		if paths, ok := fullRes["decoded_local_paths"].([]string); ok {
+			bundle.decodedPaths = appendUniqueStrings(bundle.decodedPaths, paths...)
+		}
+		if uris, ok := fullRes["decoded_local_path_uris"].([]string); ok {
+			bundle.decodedURIs = appendUniqueStrings(bundle.decodedURIs, uris...)
+		}
+	}
+	for _, r := range messages {
+		key := mediaMessageKey(rowString(r, "talker"), rowInt64(r, "local_id"), rowInt64(r, "server_id"), rowInt64(r, "create_time"))
+		if bundle := byMessage[key]; bundle != nil {
+			if len(bundle.paths) > 0 {
+				r["media_local_paths"] = bundle.paths
+			}
+			if len(bundle.pathURIs) > 0 {
+				r["media_local_path_uris"] = bundle.pathURIs
+			}
+			if len(bundle.resources) > 0 {
+				r["media_resources"] = bundle.resources
+			}
+			if len(bundle.decodedPaths) > 0 {
+				r["decoded_media_local_paths"] = bundle.decodedPaths
+			}
+			if len(bundle.decodedURIs) > 0 {
+				r["decoded_media_local_path_uris"] = bundle.decodedURIs
+			}
+			if len(bundle.hintResources) > 0 {
+				r["_media_read_hint_resources"] = bundle.hintResources
+			}
+		}
+	}
+}
+
+func (s *server) attachReadableImageMatchesFromMessage(res map[string]any, msg wcdb.Row) {
+	p, _ := msg["message_content_parsed"].(map[string]any)
+	contentMD5 := strings.ToLower(strings.TrimSpace(stringMapValue(p, "md5")))
+	s.attachReadableImageMatchesByContentMD5(res, rowInt64(msg, "create_time"), contentMD5)
+}
+
+func (s *server) attachReadableImageMatchesToMediaResourceItems(items []map[string]any) {
+	byTalker := map[string][]int64{}
+	for _, item := range items {
+		if !itemHasImageResources(item) {
+			continue
+		}
+		talker, _ := item["talker"].(string)
+		localID, _ := integerArgValue(item["local_id"])
+		if talker == "" || localID == 0 {
+			continue
+		}
+		byTalker[talker] = append(byTalker[talker], localID)
+	}
+	contentMD5s := s.messageImageContentMD5s(byTalker)
+	if len(contentMD5s) == 0 {
+		return
+	}
+	for _, item := range items {
+		talker, _ := item["talker"].(string)
+		localID, _ := integerArgValue(item["local_id"])
+		createTime, _ := integerArgValue(item["create_time"])
+		serverID, _ := integerArgValue(item["server_id"])
+		key := mediaMessageKey(talker, localID, serverID, createTime)
+		contentMD5 := contentMD5s[key]
+		if contentMD5 == "" {
+			continue
+		}
+		resources, _ := item["resources"].([]map[string]any)
+		for _, res := range resources {
+			s.attachReadableImageMatchesByContentMD5(res, createTime, contentMD5)
+		}
+	}
+}
+
+func itemHasImageResources(item map[string]any) bool {
+	resources, _ := item["resources"].([]map[string]any)
+	for _, res := range resources {
+		family, _ := res["resource_family"].(string)
+		if family == "image" || family == "cover" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) messageImageContentMD5s(byTalker map[string][]int64) map[string]string {
+	out := map[string]string{}
+	for talker, ids := range byTalker {
+		ids = uniqueInt64s(ids)
+		if talker == "" || len(ids) == 0 {
+			continue
+		}
+		tableName := "Msg_" + talkerHash(talker)
+		shards, err := s.findMsgDBs(tableName)
+		if err != nil {
+			continue
+		}
+		func() {
+			defer closeMsgDBs(shards)
+			for _, shard := range shards {
+				for start := 0; start < len(ids); start += 500 {
+					end := start + 500
+					if end > len(ids) {
+						end = len(ids)
+					}
+					chunk := ids[start:end]
+					ph := make([]string, len(chunk))
+					args := make([]any, 0, len(chunk))
+					for i, id := range chunk {
+						ph[i] = "?"
+						args = append(args, id)
+					}
+					rows, err := shard.DB.Query(fmt.Sprintf(`SELECT local_id, server_id, create_time, local_type, message_content
+						FROM %s WHERE local_id IN (%s)`, quoteIdent(tableName), strings.Join(ph, ",")), args...)
+					if err != nil {
+						continue
+					}
+					rows = decodeFields(rows, "message_content")
+					for _, r := range rows {
+						baseKind, subtype, _ := wxkind.Unpack(rowInt64(r, "local_type"))
+						if baseKind != 3 {
+							continue
+						}
+						content := rowString(r, "message_content")
+						if content == "" {
+							continue
+						}
+						parsed, _ := parseMessageContent(baseKind, subtype, content, 1).(map[string]any)
+						contentMD5 := strings.ToLower(strings.TrimSpace(stringMapValue(parsed, "md5")))
+						if md5LikeRe.MatchString(contentMD5) {
+							out[mediaMessageKey(talker, rowInt64(r, "local_id"), rowInt64(r, "server_id"), rowInt64(r, "create_time"))] = contentMD5
+						}
+					}
+				}
+			}
+		}()
+	}
+	return out
+}
+
+func (s *server) attachReadableImageMatchesByContentMD5(res map[string]any, createTime int64, contentMD5 string) {
+	family, _ := res["resource_family"].(string)
+	if family != "image" && family != "cover" {
+		return
+	}
+	contentMD5 = strings.ToLower(strings.TrimSpace(contentMD5))
+	if !md5LikeRe.MatchString(contentMD5) {
+		return
+	}
+	paths := s.readableImageMatchesByMD5(createTime, contentMD5)
+	if len(paths) == 0 {
+		return
+	}
+	if md5Value, _ := res["md5"].(string); !strings.EqualFold(md5Value, contentMD5) {
+		res["content_md5"] = contentMD5
+	}
+	allPaths := appendUniqueStrings(paths, stringSliceAny(res["local_paths"])...)
+	res["local_paths"] = allPaths
+	s.attachLocalPathAgentFields(res, family, allPaths)
+}
+
+func compactMessageMediaResource(res map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{
+		"resource_id", "resource_family", "resource_type_raw", "variant_code",
+		"size", "status", "md5", "content_md5", "file_name", "direct_readable",
+	} {
+		if v, ok := res[k]; ok {
+			out[k] = v
+		}
+	}
+	paths := stringSliceAny(res["local_paths"])
+	if len(paths) > 0 {
+		out["local_path_count"] = len(paths)
+	}
+	decodedPaths := stringSliceAny(res["decoded_local_paths"])
+	if len(decodedPaths) > 0 {
+		out["decoded_local_path_count"] = len(decodedPaths)
+	}
+	if formats := storageFormatsFromDetails(mapSliceAny(res["local_path_details"])); len(formats) > 0 {
+		out["storage_formats"] = formats
+	}
+	if formats := stringSliceAny(res["decoded_storage_formats"]); len(formats) > 0 {
+		out["decoded_storage_formats"] = formats
+	}
+	if mimes := stringSliceAny(res["decoded_mime_types"]); len(mimes) > 0 {
+		out["decoded_mime_types"] = mimes
+	}
+	return out
+}
+
+func storageFormatsFromDetails(details []map[string]any) []string {
+	var out []string
+	for _, d := range details {
+		if f, ok := d["storage_format"].(string); ok && f != "" {
+			out = appendUniqueStrings(out, f)
+		}
+	}
+	return out
+}
+
+func mediaRowKey(talker string, localID int64) string {
+	if talker == "" || localID == 0 {
+		return ""
+	}
+	return talker + "\x00" + strconv.FormatInt(localID, 10)
+}
+
+func mediaMessageKey(talker string, localID, serverID, createTime int64) string {
+	base := mediaRowKey(talker, localID)
+	if base == "" {
+		return ""
+	}
+	if serverID != 0 {
+		return base + "\x00svr=" + strconv.FormatInt(serverID, 10)
+	}
+	if createTime != 0 {
+		return base + "\x00time=" + strconv.FormatInt(createTime, 10)
+	}
+	return base
 }
 
 func (s *server) toolMediaResources(a map[string]any) (any, error) {
@@ -1020,6 +3036,22 @@ func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths boo
 		out[idx]["resources"] = resources
 		out[idx]["resource_count"] = len(resources)
 	}
+	if includeLocalPaths {
+		s.attachReadableImageMatchesToMediaResourceItems(out)
+	}
+	for _, item := range out {
+		resources, _ := item["resources"].([]map[string]any)
+		paths, uris, hints := mediaResourceReadHints(resources)
+		if len(paths) > 0 {
+			item["media_local_paths"] = paths
+		}
+		if len(uris) > 0 {
+			item["media_local_path_uris"] = uris
+		}
+		if len(hints) > 0 {
+			item["media_read_hints"] = hints
+		}
+	}
 	return out
 }
 
@@ -1058,9 +3090,1539 @@ func (s *server) mediaResourceFromRow(r wcdb.Row, includeLocalPaths bool) map[st
 		res["file_name"] = fileNames[0]
 	}
 	if includeLocalPaths {
-		res["local_paths"] = s.localMediaPaths(rowString(r, "talker"), rowInt64(r, "message_create_time"), family, md5Value, fileNames)
+		paths := s.localMediaPaths(rowString(r, "talker"), rowInt64(r, "message_create_time"), family, md5Value, fileNames)
+		res["local_paths"] = paths
+		s.attachLocalPathAgentFields(res, family, paths)
 	}
 	return res
+}
+
+func (s *server) attachLocalPathAgentFields(res map[string]any, family string, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	details := make([]map[string]any, 0, len(paths))
+	uris := make([]string, 0, len(paths))
+	var directPaths []string
+	var directURIs []string
+	var decodedPaths []string
+	var decodedURIs []string
+	var decodedFormats []string
+	var decodedMIMEs []string
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		uri := localFileURI(p)
+		direct := directReadableMediaPath(family, p)
+		info := map[string]any{
+			"path":            p,
+			"uri":             uri,
+			"storage_format":  localMediaStorageFormat(family, p),
+			"direct_readable": direct,
+		}
+		if mime := localMediaMIMEForPath(family, p); mime != "" {
+			info["mime_type"] = mime
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			info["file_size"] = st.Size()
+		}
+		if direct {
+			info["decode_status"] = "direct"
+			if meta := inspectReadableMediaFile(p); len(meta) > 0 {
+				for k, v := range meta {
+					info[k] = v
+				}
+			}
+		} else if family == "image" || family == "cover" {
+			dec := s.decodeLocalImageForAgent(p, paths)
+			for k, v := range dec {
+				info[k] = v
+			}
+			if decodedPath, _ := dec["decoded_path"].(string); decodedPath != "" {
+				decodedURI := localFileURI(decodedPath)
+				info["direct_readable"] = true
+				decodedPaths = appendUniqueStrings(decodedPaths, decodedPath)
+				decodedURIs = appendUniqueStrings(decodedURIs, decodedURI)
+				if storage, _ := dec["decoded_storage_format"].(string); storage != "" {
+					decodedFormats = appendUniqueStrings(decodedFormats, storage)
+				}
+				if mime, _ := dec["mime_type"].(string); mime != "" {
+					decodedMIMEs = appendUniqueStrings(decodedMIMEs, mime)
+				}
+				directPaths = appendUniqueStrings(directPaths, decodedPath)
+				directURIs = appendUniqueStrings(directURIs, decodedURI)
+			}
+		}
+		details = append(details, info)
+		uris = append(uris, uri)
+		if direct {
+			directPaths = append(directPaths, p)
+			directURIs = append(directURIs, uri)
+		}
+	}
+	if len(uris) > 0 {
+		res["local_path_uris"] = uris
+	}
+	if len(details) > 0 {
+		res["local_path_details"] = details
+	}
+	res["direct_readable"] = len(directPaths) > 0
+	if len(decodedPaths) > 0 {
+		res["decoded_local_paths"] = decodedPaths
+		res["decoded_local_path_uris"] = decodedURIs
+	}
+	if len(decodedFormats) > 0 {
+		res["decoded_storage_formats"] = decodedFormats
+	}
+	if len(decodedMIMEs) > 0 {
+		res["decoded_mime_types"] = decodedMIMEs
+	}
+	if len(directPaths) > 0 {
+		res["direct_readable_local_paths"] = directPaths
+		res["direct_readable_local_path_uris"] = directURIs
+	}
+}
+
+func localFileURI(path string) string {
+	return (&url.URL{Scheme: "file", Path: path}).String()
+}
+
+func localMediaMIMEForPath(family, path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if family == "voice" {
+		switch ext {
+		case ".silk":
+			return "audio/silk"
+		case ".amr":
+			return "audio/amr"
+		case ".mp3":
+			return "audio/mpeg"
+		case ".m4a":
+			return "audio/mp4"
+		case ".aac":
+			return "audio/aac"
+		case ".wav":
+			return "audio/wav"
+		case ".ogg":
+			return "audio/ogg"
+		case ".opus":
+			return "audio/opus"
+		}
+	}
+	return ""
+}
+
+func localMediaStorageFormat(family, path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if family == "image" || family == "cover" {
+		if ext == ".dat" {
+			return "wechat_image_dat"
+		}
+		if directImageExt(ext) {
+			return "image_file"
+		}
+	}
+	if family == "video" {
+		if ext == ".mp4" || ext == ".mov" || ext == ".m4v" {
+			return "video_file"
+		}
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
+			return "video_cover_file"
+		}
+	}
+	if family == "voice" {
+		switch ext {
+		case ".silk":
+			return "wechat_silk"
+		case ".amr":
+			return "amr_audio"
+		case ".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus":
+			return strings.TrimPrefix(ext, ".") + "_audio"
+		}
+	}
+	if family == "file" {
+		return "file"
+	}
+	if ext != "" {
+		return strings.TrimPrefix(ext, ".") + "_file"
+	}
+	return "unknown"
+}
+
+func directReadableMediaPath(family, path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch family {
+	case "image", "cover":
+		return directImageExt(ext)
+	case "video":
+		return directVideoFilePath(path) || directImageExt(ext)
+	case "voice":
+		switch ext {
+		case ".silk", ".amr", ".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus":
+			return true
+		default:
+			return false
+		}
+	case "file":
+		return ext != ".dat"
+	default:
+		return ext != "" && ext != ".dat"
+	}
+}
+
+func directVideoFilePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".mp4", ".mov", ".m4v":
+		return true
+	default:
+		return false
+	}
+}
+
+func directImageExt(ext string) bool {
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif":
+		return true
+	default:
+		return false
+	}
+}
+
+var (
+	wechatV4ImageHeader1 = []byte{0x07, 0x08, 0x56, 0x31, 0x08, 0x07}
+	wechatV4ImageHeader2 = []byte{0x07, 0x08, 0x56, 0x32, 0x08, 0x07}
+	wechatV4FixedAESKey  = []byte("cfcd208495d565ef")
+	jpegTail             = []byte{0xff, 0xd9}
+)
+
+func (s *server) decodeLocalImageForAgent(path string, siblingPaths []string) map[string]any {
+	if strings.ToLower(filepath.Ext(path)) != ".dat" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]any{
+			"decode_status": "decode_failed",
+			"decode_error":  err.Error(),
+		}
+	}
+	decoded, ext, meta, status, err := s.decodeWechatImageDAT(data, siblingPaths)
+	out := map[string]any{}
+	for k, v := range meta {
+		out[k] = v
+	}
+	if err != nil {
+		out["decode_status"] = status
+		out["decode_error"] = err.Error()
+		return out
+	}
+	decodedPath, err := s.writeDecodedMediaCache(path, decoded, ext)
+	if err != nil {
+		out["decode_status"] = "decode_failed"
+		out["decode_error"] = err.Error()
+		return out
+	}
+	out["decode_status"] = "decoded"
+	out["decoded_path"] = decodedPath
+	out["decoded_uri"] = localFileURI(decodedPath)
+	out["decoded_storage_format"] = "image_file"
+	if st, err := os.Stat(decodedPath); err == nil && !st.IsDir() {
+		out["decoded_file_size"] = st.Size()
+	}
+	for k, v := range mediaBytesInfo(decoded) {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *server) decodeWechatImageDAT(data []byte, siblingPaths []string) ([]byte, string, map[string]any, string, error) {
+	meta := map[string]any{}
+	if len(data) < 4 {
+		return nil, "", meta, "decode_failed", fmt.Errorf("data length is too short: %d", len(data))
+	}
+	if len(data) >= len(wechatV4ImageHeader1) &&
+		(bytes.Equal(data[:len(wechatV4ImageHeader1)], wechatV4ImageHeader1) ||
+			bytes.Equal(data[:len(wechatV4ImageHeader2)], wechatV4ImageHeader2)) {
+		decoded, ext, v4Meta, status, err := s.decodeWechatV4ImageDAT(data, siblingPaths)
+		for k, v := range v4Meta {
+			meta[k] = v
+		}
+		return decoded, ext, meta, status, err
+	}
+	decoded, ext, ok := decodeWechatV3XORImage(data)
+	if !ok {
+		meta["decode_method"] = "unknown"
+		return nil, "", meta, "unsupported_format", fmt.Errorf("unrecognized WeChat image dat header: %x", data[:minInt(len(data), 6)])
+	}
+	meta["decode_method"] = "wechat_v3_xor"
+	return decoded, ext, meta, "decoded", nil
+}
+
+func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]byte, string, map[string]any, string, error) {
+	meta := map[string]any{
+		"decode_method": "wechat_v4_dat_aes_ecb_xor",
+	}
+	if len(data) < 15 {
+		return nil, "", meta, "decode_failed", fmt.Errorf("data length is too short for WeChat v4 image dat: %d", len(data))
+	}
+	aesSize := binary.LittleEndian.Uint32(data[6:10])
+	xorSize := binary.LittleEndian.Uint32(data[10:14])
+	meta["v4_aes_size"] = aesSize
+	meta["v4_xor_size"] = xorSize
+	xorKey, source := deriveWechatV4XORKey(data, siblingPaths)
+	meta["v4_xor_key"] = fmt.Sprintf("0x%02x", xorKey)
+	meta["v4_xor_key_source"] = source
+
+	var keys []imageKeyCandidate
+	if bytes.Equal(data[:len(wechatV4ImageHeader1)], wechatV4ImageHeader1) {
+		keys = []imageKeyCandidate{{key: wechatV4FixedAESKey, source: "format1_fixed"}}
+	} else {
+		keys = s.imageKeyCandidates()
+		if len(keys) == 0 {
+			meta["v4_key_source"] = "missing"
+			return nil, "", meta, "needs_image_key", fmt.Errorf("WeChat v4 image .dat requires image_key; set config image_key or WX_MCP_IMAGE_KEY")
+		}
+	}
+
+	var lastErr error
+	for _, cand := range keys {
+		decoded, err := decodeWechatV4ImageData(data, cand.key, xorKey)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		ext := imageExtForData(decoded)
+		if ext == "" {
+			lastErr = fmt.Errorf("unknown image type after decryption: %x", decoded[:minInt(len(decoded), 6)])
+			continue
+		}
+		meta["v4_key_source"] = cand.source
+		if ext == "wxgf" {
+			return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+		}
+		return decoded, ext, meta, "decoded", nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("image_key did not decrypt the image")
+	}
+	meta["v4_key_source"] = "config_or_env"
+	return nil, "", meta, "decode_failed", lastErr
+}
+
+func decodeWechatV4ImageData(data, aesKey []byte, xorKey byte) ([]byte, error) {
+	if len(data) < 15 {
+		return nil, fmt.Errorf("data length is too short for WeChat v4 image dat: %d", len(data))
+	}
+	aesSize := binary.LittleEndian.Uint32(data[6:10])
+	xorSize := binary.LittleEndian.Uint32(data[10:14])
+	fileData := data[15:]
+	alignedAesSize := aesSize
+	if aesSize > 0 {
+		pad := uint32(aes.BlockSize) - aesSize%uint32(aes.BlockSize)
+		if pad == 0 {
+			pad = uint32(aes.BlockSize)
+		}
+		alignedAesSize += pad
+	}
+	if uint32(len(fileData)) < alignedAesSize {
+		return nil, fmt.Errorf("file data too short for declared AES length")
+	}
+	aesPart := fileData[:alignedAesSize]
+	remaining := fileData[alignedAesSize:]
+	if uint32(len(remaining)) < xorSize {
+		return nil, fmt.Errorf("file data too short for declared XOR length")
+	}
+	var decodedAES []byte
+	var err error
+	if len(aesPart) > 0 {
+		decodedAES, err = decryptAESECBPKCS7(aesPart, aesKey)
+		if err != nil {
+			return nil, fmt.Errorf("AES decryption failed: %w", err)
+		}
+	}
+	rawLen := uint32(len(remaining)) - xorSize
+	rawMiddle := remaining[:rawLen]
+	xorTail := remaining[rawLen:]
+	decodedXOR := make([]byte, len(xorTail))
+	for i := range xorTail {
+		decodedXOR[i] = xorTail[i] ^ xorKey
+	}
+	out := make([]byte, 0, len(decodedAES)+len(rawMiddle)+len(decodedXOR))
+	out = append(out, decodedAES...)
+	out = append(out, rawMiddle...)
+	out = append(out, decodedXOR...)
+	return out, nil
+}
+
+func decryptAESECBPKCS7(data, key []byte) ([]byte, error) {
+	if len(key) < aes.BlockSize {
+		return nil, fmt.Errorf("image key length %d is shorter than AES-128 key length", len(key))
+	}
+	key = key[:aes.BlockSize]
+	if len(data) == 0 {
+		return []byte{}, nil
+	}
+	if len(data)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("data length %d is not a multiple of AES block size", len(data))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(data))
+	for start := 0; start < len(data); start += aes.BlockSize {
+		block.Decrypt(out[start:start+aes.BlockSize], data[start:start+aes.BlockSize])
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	padding := int(out[len(out)-1])
+	if padding == 0 || padding > aes.BlockSize || padding > len(out) {
+		return nil, fmt.Errorf("invalid PKCS7 padding length: %d", padding)
+	}
+	for i := len(out) - padding; i < len(out); i++ {
+		if out[i] != byte(padding) {
+			return nil, fmt.Errorf("invalid PKCS7 padding content")
+		}
+	}
+	return out[:len(out)-padding], nil
+}
+
+type imageKeyCandidate struct {
+	key    []byte
+	source string
+}
+
+func (s *server) imageKeyCandidates() []imageKeyCandidate {
+	raw := strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY"))
+	source := "env"
+	if raw == "" && s != nil && s.cfg != nil {
+		raw = strings.TrimSpace(s.cfg.ImageKey)
+		source = "config"
+	}
+	if raw == "" {
+		return nil
+	}
+	var out []imageKeyCandidate
+	if len(raw) >= aes.BlockSize {
+		out = append(out, imageKeyCandidate{key: []byte(raw[:aes.BlockSize]), source: source + "_raw"})
+	}
+	if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) >= aes.BlockSize {
+		out = append(out, imageKeyCandidate{key: decoded[:aes.BlockSize], source: source + "_hex"})
+	}
+	return out
+}
+
+func deriveWechatV4XORKey(data []byte, siblingPaths []string) (byte, string) {
+	for _, p := range siblingPaths {
+		if !strings.HasSuffix(strings.ToLower(filepath.Base(p)), "_t.dat") {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if k, ok := deriveWechatV4XORKeyFromTail(b); ok {
+			return k, "thumbnail_tail"
+		}
+	}
+	if k, ok := deriveWechatV4XORKeyFromTail(data); ok {
+		return k, "file_tail"
+	}
+	return 0x37, "default"
+}
+
+func deriveWechatV4XORKeyFromTail(data []byte) (byte, bool) {
+	if len(data) < 17 || len(data) < len(wechatV4ImageHeader2) ||
+		(!bytes.Equal(data[:len(wechatV4ImageHeader1)], wechatV4ImageHeader1) &&
+			!bytes.Equal(data[:len(wechatV4ImageHeader2)], wechatV4ImageHeader2)) {
+		return 0, false
+	}
+	xorSize := binary.LittleEndian.Uint32(data[10:14])
+	if xorSize < 2 {
+		return 0, false
+	}
+	fileData := data[15:]
+	if uint32(len(fileData)) < xorSize {
+		return 0, false
+	}
+	xorTail := fileData[uint32(len(fileData))-xorSize:]
+	if len(xorTail) < 2 {
+		return 0, false
+	}
+	k0 := xorTail[len(xorTail)-2] ^ jpegTail[0]
+	k1 := xorTail[len(xorTail)-1] ^ jpegTail[1]
+	if k0 != k1 {
+		return 0, false
+	}
+	return k0, true
+}
+
+func decodeWechatV3XORImage(data []byte) ([]byte, string, bool) {
+	formats := []struct {
+		ext    string
+		header []byte
+	}{
+		{"jpg", []byte{0xff, 0xd8, 0xff}},
+		{"png", []byte{0x89, 0x50, 0x4e, 0x47}},
+		{"gif", []byte{0x47, 0x49, 0x46, 0x38}},
+		{"bmp", []byte{0x42, 0x4d}},
+		{"tiff", []byte{0x49, 0x49, 0x2a, 0x00}},
+	}
+	for _, f := range formats {
+		if len(data) < len(f.header) {
+			continue
+		}
+		key := data[0] ^ f.header[0]
+		ok := true
+		for i := range f.header {
+			if data[i]^key != f.header[i] {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		out := make([]byte, len(data))
+		for i := range data {
+			out[i] = data[i] ^ key
+		}
+		return out, f.ext, true
+	}
+	return nil, "", false
+}
+
+func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("decoded media is empty")
+	}
+	dir, err := s.mediaDecodeCacheDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	base := safeCacheID(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
+	if base == "" {
+		base = "media"
+	}
+	ext = strings.TrimPrefix(strings.ToLower(ext), ".")
+	if ext == "" {
+		ext = "bin"
+	}
+	dst := filepath.Join(dir, fmt.Sprintf("%s-%s.%s", base, hex.EncodeToString(sum[:8]), ext))
+	if st, err := os.Stat(dst); err == nil && !st.IsDir() && st.Size() == int64(len(data)) {
+		return dst, nil
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return dst, nil
+}
+
+func (s *server) mediaDecodeCacheDir() (string, error) {
+	home, err := wxMCPHomeDir()
+	if err != nil {
+		return "", err
+	}
+	id := "default"
+	if s != nil && s.cfg != nil {
+		id = s.cfg.Wxid
+		if id == "" && s.cfg.DBRoot != "" {
+			sum := md5.Sum([]byte(s.cfg.DBRoot))
+			id = "root-" + hex.EncodeToString(sum[:8])
+		}
+	}
+	return filepath.Join(home, ".wx-mcp", "media-cache", safeCacheID(id)), nil
+}
+
+func imageExtForData(data []byte) string {
+	switch {
+	case len(data) >= 3 && bytes.Equal(data[:3], []byte{0xff, 0xd8, 0xff}):
+		return "jpg"
+	case len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}):
+		return "png"
+	case len(data) >= 4 && bytes.Equal(data[:4], []byte{0x47, 0x49, 0x46, 0x38}):
+		return "gif"
+	case len(data) >= 2 && bytes.Equal(data[:2], []byte{0x42, 0x4d}):
+		return "bmp"
+	case len(data) >= 4 && bytes.Equal(data[:4], []byte{0x77, 0x78, 0x67, 0x66}):
+		return "wxgf"
+	default:
+		return ""
+	}
+}
+
+func mediaBytesInfo(data []byte) map[string]any {
+	out := map[string]any{}
+	if ext := imageExtForData(data); ext != "" {
+		out["mime_type"] = imageMIMEForExt(ext)
+	}
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		out["width"] = cfg.Width
+		out["height"] = cfg.Height
+	}
+	return out
+}
+
+func inspectReadableMediaFile(path string) map[string]any {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return mediaBytesInfo(b)
+}
+
+func imageMIMEForExt(ext string) string {
+	switch strings.TrimPrefix(strings.ToLower(ext), ".") {
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "png":
+		return "image/png"
+	case "gif":
+		return "image/gif"
+	case "bmp":
+		return "image/bmp"
+	case "webp":
+		return "image/webp"
+	default:
+		return ""
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func attachMediaReadHintsToMessages(rows []wcdb.Row) {
+	attachMediaReadHintsToMessagesWithServer(nil, rows)
+}
+
+func (s *server) attachMediaReadHintsToMessages(rows []wcdb.Row) {
+	attachMediaReadHintsToMessagesWithServer(s, rows)
+}
+
+func attachMediaReadHintsToMessagesWithServer(s *server, rows []wcdb.Row) {
+	for _, r := range rows {
+		_, _, hints := mediaResourceReadHints(rowMediaResources(r))
+		hints = append(hints, messageXMLMediaReadHints(s, r)...)
+		if len(hints) > 0 {
+			r["media_read_hints"] = hints
+		}
+		delete(r, "_media_read_hint_resources")
+	}
+}
+
+func rowMediaResources(r wcdb.Row) []map[string]any {
+	if resources, ok := r["_media_read_hint_resources"].([]map[string]any); ok {
+		return resources
+	}
+	if resources, ok := r["media_resources"].([]map[string]any); ok {
+		return resources
+	}
+	return nil
+}
+
+func mediaResourceReadHints(resources []map[string]any) ([]string, []string, []map[string]any) {
+	var allPaths []string
+	var allURIs []string
+	var allDetails []map[string]any
+	var directPaths []string
+	var directURIs []string
+	var decodedPaths []string
+	var decodedURIs []string
+	var resourceIDs []any
+	var families []string
+	for _, res := range resources {
+		paths := stringSliceAny(res["local_paths"])
+		uris := stringSliceAny(res["local_path_uris"])
+		allPaths = appendUniqueStrings(allPaths, paths...)
+		allURIs = appendUniqueStrings(allURIs, uris...)
+		allDetails = appendUniquePathDetails(allDetails, mapSliceAny(res["local_path_details"])...)
+		directPaths = appendUniqueStrings(directPaths, stringSliceAny(res["direct_readable_local_paths"])...)
+		directURIs = appendUniqueStrings(directURIs, stringSliceAny(res["direct_readable_local_path_uris"])...)
+		decodedPaths = appendUniqueStrings(decodedPaths, stringSliceAny(res["decoded_local_paths"])...)
+		decodedURIs = appendUniqueStrings(decodedURIs, stringSliceAny(res["decoded_local_path_uris"])...)
+		if id := res["resource_id"]; id != nil {
+			resourceIDs = appendUniqueAny(resourceIDs, id)
+		}
+		if fam, ok := res["resource_family"].(string); ok && fam != "" {
+			families = appendUniqueStrings(families, fam)
+		}
+	}
+	if len(allPaths) == 0 && len(allURIs) == 0 {
+		return allPaths, allURIs, nil
+	}
+	h := map[string]any{
+		"source":             "message_resource",
+		"address_type":       "local_file",
+		"resource_ids":       resourceIDs,
+		"direct_readable":    len(directPaths) > 0,
+		"local_paths":        allPaths,
+		"local_path_uris":    allURIs,
+		"local_path_details": allDetails,
+	}
+	if len(families) == 1 {
+		h["resource_family"] = families[0]
+	} else if len(families) > 1 {
+		h["resource_families"] = families
+	}
+	if len(directPaths) > 0 {
+		h["direct_readable_local_paths"] = directPaths
+		h["direct_readable_local_path_uris"] = directURIs
+	}
+	if len(decodedPaths) > 0 {
+		h["decoded_local_paths"] = decodedPaths
+		h["decoded_local_path_uris"] = decodedURIs
+	}
+	hints := []map[string]any{h}
+	return allPaths, allURIs, hints
+}
+
+func messageXMLMediaReadHints(s *server, r wcdb.Row) []map[string]any {
+	p, _ := r["message_content_parsed"].(map[string]any)
+	if p == nil {
+		return nil
+	}
+	switch rowInt64(r, "base_kind") {
+	case 3:
+		if h := imageXMLReadHint(p); h != nil {
+			return []map[string]any{h}
+		}
+	case 34:
+		if h := voiceXMLReadHint(s, r, p, "message_xml", ""); h != nil {
+			return []map[string]any{h}
+		}
+	case 47:
+		if h := emojiXMLReadHint(p); h != nil {
+			return []map[string]any{h}
+		}
+	case 49:
+		if rowInt64(r, "subtype") == 57 {
+			return quoteXMLReadHints(s, r, p)
+		}
+		if rowInt64(r, "subtype") == 19 {
+			return forwardXMLReadHints(s, r, p)
+		}
+	}
+	return nil
+}
+
+func imageXMLReadHint(p map[string]any) map[string]any {
+	cdn := compactMap(map[string]any{
+		"mid_url":   stringMapValue(p, "cdn_mid_url"),
+		"big_url":   stringMapValue(p, "cdn_big_url"),
+		"thumb_url": stringMapValue(p, "cdn_thumb_url"),
+	})
+	h := compactMap(map[string]any{
+		"source":          "message_xml",
+		"address_type":    "wechat_cdn",
+		"resource_family": "image",
+		"direct_readable": false,
+		"wechat_cdn":      cdn,
+		"aeskey":          stringMapValue(p, "aeskey"),
+		"md5":             stringMapValue(p, "md5"),
+		"length":          p["length"],
+		"hd_length":       p["hd_length"],
+		"mid_width":       p["mid_width"],
+		"mid_height":      p["mid_height"],
+		"hd_width":        p["hd_width"],
+		"hd_height":       p["hd_height"],
+	})
+	if len(h) <= 4 && len(cdn) == 0 {
+		return nil
+	}
+	return h
+}
+
+type voiceBlob struct {
+	createTime int64
+	localID    int64
+	serverID   int64
+	data       []byte
+	dataIndex  string
+}
+
+func voiceXMLReadHint(s *server, r wcdb.Row, p map[string]any, source, role string) map[string]any {
+	h := compactMap(map[string]any{
+		"source":          source,
+		"address_type":    "wechat_voice",
+		"resource_family": "voice",
+		"direct_readable": false,
+		"duration_ms":     p["duration_ms"],
+		"format":          voiceFormatName(p["voice_format"]),
+		"length":          p["length"],
+	})
+	if role != "" {
+		h["message_role"] = role
+	}
+	if s == nil {
+		if len(h) <= 4 {
+			return nil
+		}
+		return h
+	}
+	talker := rowString(r, "talker")
+	localID := rowInt64(r, "local_id")
+	serverID := rowInt64(r, "server_id")
+	createTime := rowInt64(r, "create_time")
+	blob, err := s.voiceBlob(talker, localID, serverID, createTime)
+	if err != nil || blob == nil || len(blob.data) == 0 {
+		if err != nil {
+			h["lookup_error"] = err.Error()
+		}
+		if len(h) <= 4 {
+			return nil
+		}
+		return h
+	}
+	path, err := s.writeVoiceCache(talker, blob, p)
+	if err != nil {
+		h["lookup_error"] = err.Error()
+		return h
+	}
+	h["source"] = "media_0_voiceinfo"
+	h["address_type"] = "local_file"
+	h["size"] = int64(len(blob.data))
+	h["data_index"] = blob.dataIndex
+	h["voice_create_time"] = blob.createTime
+	if blob.localID != 0 {
+		h["voice_local_id"] = blob.localID
+	}
+	if blob.serverID != 0 {
+		h["voice_server_id_str"] = strconv.FormatInt(blob.serverID, 10)
+	}
+	h["local_paths"] = []string{path}
+	s.attachLocalPathAgentFields(h, "voice", []string{path})
+	if transcript := s.voiceTranscriptForAgent(path); len(transcript) > 0 {
+		h["transcript"] = transcript
+	}
+	return h
+}
+
+func (s *server) voiceBlob(talker string, localID, serverID, createTime int64) (*voiceBlob, error) {
+	if s == nil || talker == "" {
+		return nil, nil
+	}
+	var clauses []string
+	var args []any
+	args = append(args, talker)
+	if localID != 0 && createTime != 0 {
+		clauses = append(clauses, "(v.local_id = ? AND ABS(v.create_time - ?) <= 5)")
+		args = append(args, localID, createTime)
+	}
+	if serverID != 0 {
+		clauses = append(clauses, "(v.svr_id = ? AND v.svr_id != 0)")
+		args = append(args, serverID)
+	}
+	if createTime != 0 {
+		clauses = append(clauses, "v.create_time = ?")
+		args = append(args, createTime)
+	}
+	if localID != 0 {
+		clauses = append(clauses, "v.local_id = ?")
+		args = append(args, localID)
+	}
+	if len(clauses) == 0 {
+		return nil, nil
+	}
+	db, err := s.openDB("message", "media_0.db")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	args = append(args, serverID, createTime, createTime)
+	rows, err := db.Query(fmt.Sprintf(`SELECT v.create_time, v.local_id, v.svr_id,
+		v.voice_data, v.data_index
+		FROM VoiceInfo v
+		LEFT JOIN Name2Id n ON n.rowid = v.chat_name_id
+		WHERE n.user_name = ? AND (%s)
+		ORDER BY CASE WHEN v.svr_id = ? AND v.svr_id != 0 THEN 0 ELSE 1 END,
+			CASE WHEN ? != 0 THEN ABS(v.create_time - ?) ELSE 0 END,
+			v.create_time DESC
+		LIMIT 1`, strings.Join(clauses, " OR ")), args...)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	data := rowBytes(rows[0], "voice_data")
+	if len(data) == 0 {
+		return nil, nil
+	}
+	return &voiceBlob{
+		createTime: rowInt64(rows[0], "create_time"),
+		localID:    rowInt64(rows[0], "local_id"),
+		serverID:   rowInt64(rows[0], "svr_id"),
+		data:       data,
+		dataIndex:  rowString(rows[0], "data_index"),
+	}, nil
+}
+
+func (s *server) writeVoiceCache(talker string, blob *voiceBlob, p map[string]any) (string, error) {
+	if blob == nil || len(blob.data) == 0 {
+		return "", fmt.Errorf("voice data is empty")
+	}
+	ext := voiceExtForData(blob.data)
+	if ext == "" {
+		ext = "silk"
+	}
+	base := fmt.Sprintf("voice-%s-%d-%d", talkerHash(talker), blob.localID, blob.createTime)
+	if blob.serverID != 0 {
+		base += "-" + strconv.FormatInt(blob.serverID, 10)
+	}
+	if ms, ok := integerArgValue(p["duration_ms"]); ok && ms > 0 {
+		base += fmt.Sprintf("-%dms", ms)
+	}
+	return s.writeDecodedMediaCache(base+"."+ext, blob.data, ext)
+}
+
+func (s *server) voiceTranscriptForAgent(audioPath string) map[string]any {
+	audioPath = strings.TrimSpace(audioPath)
+	if audioPath == "" {
+		return nil
+	}
+	cachePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".transcript.json"
+	if cached := readVoiceTranscriptCache(cachePath); voiceTranscriptCacheUsable(cached) {
+		return cached
+	}
+	asrPath, err := s.voiceAudioForASR(audioPath)
+	if err != nil {
+		return writeVoiceTranscriptCache(cachePath, compactMap(map[string]any{
+			"cache_version": voiceTranscriptCacheVersion,
+			"status":        "unavailable",
+			"engine":        "local_asr",
+		}))
+	}
+	text, engine, model, err := runLocalVoiceASR(asrPath)
+	status := "ok"
+	if err != nil {
+		status = "unavailable"
+	}
+	text = cleanVoiceTranscriptText(text)
+	if status == "ok" && text == "" {
+		status = "no_speech"
+	}
+	return writeVoiceTranscriptCache(cachePath, compactMap(map[string]any{
+		"cache_version": voiceTranscriptCacheVersion,
+		"status":        status,
+		"text":          text,
+		"engine":        engine,
+		"model":         model,
+	}))
+}
+
+const voiceTranscriptCacheVersion = 3
+
+func voiceTranscriptCacheUsable(cached map[string]any) bool {
+	if len(cached) == 0 {
+		return false
+	}
+	version, ok := integerArgValue(cached["cache_version"])
+	return ok && version == voiceTranscriptCacheVersion
+}
+
+func readVoiceTranscriptCache(path string) map[string]any {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return compactMap(out)
+}
+
+func writeVoiceTranscriptCache(path string, transcript map[string]any) map[string]any {
+	transcript = compactMap(transcript)
+	if len(transcript) == 0 {
+		return nil
+	}
+	if data, err := json.MarshalIndent(transcript, "", "  "); err == nil {
+		_ = os.WriteFile(path, append(data, '\n'), 0o600)
+	}
+	return transcript
+}
+
+func (s *server) voiceAudioForASR(path string) (string, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".wav", ".mp3", ".flac", ".ogg":
+		return path, nil
+	case ".silk":
+		return s.decodeSILKVoiceToWAV(path)
+	default:
+		return "", fmt.Errorf("unsupported voice audio format for local ASR: %s", ext)
+	}
+}
+
+func (s *server) decodeSILKVoiceToWAV(path string) (string, error) {
+	decoder := findSILKDecoder()
+	if decoder == "" {
+		return "", fmt.Errorf("SILK decoder not found; set WX_MCP_SILK_DECODER")
+	}
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	wavPath := base + ".wav"
+	if st, err := os.Stat(wavPath); err == nil && !st.IsDir() && st.Size() > 44 {
+		return wavPath, nil
+	}
+	pcmPath := base + ".pcm"
+	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, decoder, path, pcmPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(pcmPath)
+		return "", fmt.Errorf("SILK decode failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	pcm, err := os.ReadFile(pcmPath)
+	_ = os.Remove(pcmPath)
+	if err != nil {
+		return "", err
+	}
+	if err := writePCM16LEMonoWAV(wavPath, pcm, 24000); err != nil {
+		return "", err
+	}
+	return wavPath, nil
+}
+
+func findSILKDecoder() string {
+	if p := strings.TrimSpace(os.Getenv("WX_MCP_SILK_DECODER")); p != "" {
+		return p
+	}
+	for _, name := range []string{"silk_v3_decoder", "silk_decoder", "silk-decoder"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+func writePCM16LEMonoWAV(path string, pcm []byte, sampleRate int) error {
+	if len(pcm) == 0 {
+		return fmt.Errorf("pcm audio is empty")
+	}
+	var buf bytes.Buffer
+	byteRate := uint32(sampleRate * 2)
+	blockAlign := uint16(2)
+	dataLen := uint32(len(pcm))
+	buf.WriteString("RIFF")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(36)+dataLen)
+	buf.WriteString("WAVEfmt ")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(&buf, binary.LittleEndian, byteRate)
+	_ = binary.Write(&buf, binary.LittleEndian, blockAlign)
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(16))
+	buf.WriteString("data")
+	_ = binary.Write(&buf, binary.LittleEndian, dataLen)
+	buf.Write(pcm)
+	return os.WriteFile(path, buf.Bytes(), 0o600)
+}
+
+func runLocalVoiceASR(audioPath string) (text, engine, model string, err error) {
+	if cmd := strings.TrimSpace(os.Getenv("WX_MCP_VOICE_TRANSCRIBE_CMD")); cmd != "" {
+		text, err = runConfiguredVoiceTranscriber(cmd, audioPath)
+		return text, "custom", "", err
+	}
+	if python := findFasterWhisperPython(); python != "" {
+		return runFasterWhisperVoiceASRWithPython(python, audioPath)
+	}
+	cli, err := exec.LookPath(firstNonEmpty(os.Getenv("WX_MCP_WHISPER_CLI"), "whisper-cli"))
+	if err != nil {
+		return "", "local_asr", "", fmt.Errorf("whisper-cli not found")
+	}
+	model = findWhisperModel()
+	if model == "" {
+		return "", "whisper.cpp", "", fmt.Errorf("whisper model not found; set WX_MCP_WHISPER_MODEL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
+	defer cancel()
+	out, err := exec.CommandContext(ctx, cli, "-m", model, "-f", audioPath, "-l", "auto", "-nt", "-np").Output()
+	if err != nil {
+		return "", "whisper.cpp", model, err
+	}
+	return string(out), "whisper.cpp", model, nil
+}
+
+const defaultFasterWhisperModel = "large-v3"
+
+func runFasterWhisperVoiceASR(audioPath string) (text, engine, model string, err error) {
+	python := findFasterWhisperPython()
+	if python == "" {
+		return "", "faster-whisper", defaultFasterWhisperModel, fmt.Errorf("faster-whisper python runtime not found")
+	}
+	return runFasterWhisperVoiceASRWithPython(python, audioPath)
+}
+
+func runFasterWhisperVoiceASRWithPython(python, audioPath string) (text, engine, model string, err error) {
+	model = firstNonEmpty(os.Getenv("WX_MCP_FASTER_WHISPER_MODEL"), defaultFasterWhisperModel)
+	language := firstNonEmpty(os.Getenv("WX_MCP_FASTER_WHISPER_LANGUAGE"), os.Getenv("WX_MCP_VOICE_LANGUAGE"), "zh")
+	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
+	defer cancel()
+	out, err := exec.CommandContext(ctx, python, "-c", fasterWhisperPythonScript, audioPath, model, language).CombinedOutput()
+	if err != nil {
+		return "", "faster-whisper", model, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return string(out), "faster-whisper", model, nil
+}
+
+const fasterWhisperPythonScript = `
+import os
+import sys
+from faster_whisper import WhisperModel
+
+audio_path = sys.argv[1]
+model_name = sys.argv[2]
+language = sys.argv[3] if len(sys.argv) > 3 else "zh"
+device = os.environ.get("WX_MCP_FASTER_WHISPER_DEVICE", "cpu")
+compute_type = os.environ.get("WX_MCP_FASTER_WHISPER_COMPUTE_TYPE", "int8")
+
+model = WhisperModel(model_name, device=device, compute_type=compute_type)
+kwargs = {"beam_size": 5, "vad_filter": True}
+if language and language.lower() != "auto":
+    kwargs["language"] = language
+segments, info = model.transcribe(audio_path, **kwargs)
+print("".join(segment.text for segment in segments).strip())
+`
+
+func findFasterWhisperPython() string {
+	var candidates []string
+	if p := strings.TrimSpace(os.Getenv("WX_MCP_FASTER_WHISPER_PYTHON")); p != "" {
+		candidates = append(candidates, p)
+	}
+	if home, _ := os.UserHomeDir(); home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".hermes", "venv", "bin", "python3"),
+			filepath.Join(home, "code", "hermes-agent", "venv", "bin", "python3"),
+		)
+	}
+	for _, name := range []string{"python3", "python"} {
+		if p, err := exec.LookPath(name); err == nil {
+			candidates = append(candidates, p)
+		}
+	}
+	seen := map[string]bool{}
+	for _, p := range candidates {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if pythonHasFasterWhisper(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+func pythonHasFasterWhisper(python string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, python, "-c", "import faster_whisper").Run() == nil
+}
+
+func runConfiguredVoiceTranscriber(command, audioPath string) (string, error) {
+	if !strings.Contains(command, "{audio}") {
+		command += " " + shellQuote(audioPath)
+	} else {
+		command = strings.ReplaceAll(command, "{audio}", shellQuote(audioPath))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/sh", "-c", command).Output()
+	return string(out), err
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func findWhisperModel() string {
+	if p := strings.TrimSpace(os.Getenv("WX_MCP_WHISPER_MODEL")); p != "" {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	var candidates []string
+	if home != "" {
+		for _, pattern := range []string{
+			filepath.Join(home, ".cache", "whisper-cpp", "ggml-*.bin"),
+			filepath.Join(home, ".cache", "whisper", "ggml-*.bin"),
+			filepath.Join(home, ".local", "share", "whisper-cpp", "ggml-*.bin"),
+		} {
+			matches, _ := filepath.Glob(pattern)
+			candidates = append(candidates, matches...)
+		}
+	}
+	for _, pattern := range []string{
+		"/opt/homebrew/share/whisper-cpp/ggml-*.bin",
+		"/usr/local/share/whisper-cpp/ggml-*.bin",
+	} {
+		matches, _ := filepath.Glob(pattern)
+		candidates = append(candidates, matches...)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return whisperModelRank(candidates[i]) > whisperModelRank(candidates[j])
+	})
+	for _, p := range candidates {
+		if strings.Contains(filepath.Base(p), "for-tests") {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
+			return p
+		}
+	}
+	return ""
+}
+
+func whisperModelRank(path string) int {
+	name := strings.ToLower(filepath.Base(path))
+	switch {
+	case strings.Contains(name, "large"):
+		return 6
+	case strings.Contains(name, "medium"):
+		return 5
+	case strings.Contains(name, "small"):
+		return 4
+	case strings.Contains(name, "base"):
+		return 3
+	case strings.Contains(name, "tiny"):
+		return 2
+	default:
+		return 1
+	}
+}
+
+func voiceCommandTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("WX_MCP_VOICE_TIMEOUT_SECONDS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 180 * time.Second
+}
+
+func cleanVoiceTranscriptText(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var lines []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "[BLANK_AUDIO]" || line == "[ Silence ]" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func voiceExtForData(data []byte) string {
+	if bytes.Contains(data[:minInt(len(data), 16)], []byte("SILK_V3")) {
+		return "silk"
+	}
+	switch {
+	case len(data) >= 3 && bytes.Equal(data[:3], []byte("ID3")):
+		return "mp3"
+	case len(data) >= 4 && bytes.Equal(data[:4], []byte("RIFF")):
+		return "wav"
+	default:
+		return ""
+	}
+}
+
+func voiceFormatName(v any) string {
+	n, ok := integerArgValue(v)
+	if !ok {
+		return ""
+	}
+	switch n {
+	case 4:
+		return "silk"
+	default:
+		return fmt.Sprintf("format_%d", n)
+	}
+}
+
+func quoteXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string]any {
+	refer, _ := p["refermsg"].(map[string]any)
+	if refer == nil {
+		return nil
+	}
+	refType := int64(0)
+	if n, ok := integerArgValue(refer["type"]); ok {
+		refType = n
+	}
+	parsed, _ := refer["content_parsed"].(map[string]any)
+	if parsed == nil {
+		return nil
+	}
+	refCreateTime := int64(0)
+	if n, ok := integerArgValue(refer["createtime"]); ok {
+		refCreateTime = n
+	}
+	if refCreateTime == 0 {
+		refCreateTime = rowInt64(row, "create_time")
+	}
+	var hints []map[string]any
+	switch refType {
+	case 3:
+		if h := s.directImageReadHintByContentMD5(stringMapValue(parsed, "md5"), refCreateTime); h != nil {
+			addReferMsgHintContext(h, refer)
+			hints = append(hints, h)
+		}
+		if h := imageXMLReadHint(parsed); h != nil {
+			h["source"] = "message_refermsg"
+			h["message_role"] = "referenced_message"
+			addReferMsgHintContext(h, refer)
+			hints = append(hints, h)
+		}
+	case 34:
+		refRow := wcdb.Row{
+			"talker":      firstNonEmpty(stringMapValue(refer, "chatusr"), rowString(row, "talker")),
+			"create_time": refCreateTime,
+			"base_kind":   int64(34),
+			"kind_name":   "voice",
+		}
+		if sid, err := strconv.ParseInt(stringMapValue(refer, "svrid"), 10, 64); err == nil {
+			refRow["server_id"] = sid
+		}
+		if h := voiceXMLReadHint(s, refRow, parsed, "message_refermsg", "referenced_message"); h != nil {
+			addReferMsgHintContext(h, refer)
+			hints = append(hints, h)
+		}
+	}
+	if len(hints) > 0 {
+		refer["media_read_hints"] = hints
+	}
+	return hints
+}
+
+func forwardXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string]any {
+	if s == nil {
+		return nil
+	}
+	var hints []map[string]any
+	var walk func([]wxparse.ForwardItem, []int)
+	walk = func(items []wxparse.ForwardItem, prefix []int) {
+		for i, it := range items {
+			path := appendForwardPath(prefix, i)
+			if it.DataType == 2 {
+				if h := s.directImageReadHintByContentMD5(it.FullMD5, it.SrcMsgCreateTime); h != nil {
+					h["source"] = "message_forward_item"
+					h["message_role"] = "forward_item"
+					h["forward_path"] = forwardPathString(path)
+					h["resource_family"] = "image"
+					h["content_md5"] = strings.ToLower(strings.TrimSpace(it.FullMD5))
+					hints = append(hints, h)
+				}
+			}
+			if len(it.NestedItems) > 0 {
+				walk(it.NestedItems, path)
+			}
+		}
+	}
+	switch items := p["forward_items"].(type) {
+	case []wxparse.ForwardItem:
+		walk(items, nil)
+	}
+	return hints
+}
+
+func (s *server) directImageReadHintByContentMD5(contentMD5 string, createTime int64) map[string]any {
+	if s == nil {
+		return nil
+	}
+	paths := s.readableImageMatchesByMD5(createTime, contentMD5)
+	if len(paths) == 0 {
+		return nil
+	}
+	res := map[string]any{
+		"resource_family": "image",
+		"content_md5":     strings.ToLower(strings.TrimSpace(contentMD5)),
+		"local_paths":     paths,
+	}
+	s.attachLocalPathAgentFields(res, "image", paths)
+	_, _, hints := mediaResourceReadHints([]map[string]any{res})
+	if len(hints) == 0 {
+		return nil
+	}
+	h := hints[0]
+	h["source"] = "message_refermsg"
+	h["message_role"] = "referenced_message"
+	h["content_md5"] = strings.ToLower(strings.TrimSpace(contentMD5))
+	if ids, ok := h["resource_ids"].([]any); ok && len(ids) == 0 {
+		delete(h, "resource_ids")
+	}
+	return h
+}
+
+func addReferMsgHintContext(h map[string]any, refer map[string]any) {
+	ref := compactMap(map[string]any{
+		"type":         refer["type"],
+		"create_time":  refer["createtime"],
+		"display_name": refer["displayname"],
+		"fromusr":      refer["fromusr"],
+		"chatusr":      refer["chatusr"],
+		"server_id":    refer["svrid"],
+	})
+	if len(ref) > 0 {
+		h["refermsg"] = ref
+	}
+}
+
+func emojiXMLReadHint(p map[string]any) map[string]any {
+	cdn := compactMap(map[string]any{
+		"cdn_url":     stringMapValue(p, "cdn_url"),
+		"encrypt_url": stringMapValue(p, "encrypt_url"),
+	})
+	h := compactMap(map[string]any{
+		"source":          "message_xml",
+		"address_type":    "wechat_cdn",
+		"resource_family": "sticker",
+		"direct_readable": false,
+		"wechat_cdn":      cdn,
+		"aeskey":          stringMapValue(p, "aeskey"),
+		"md5":             stringMapValue(p, "md5"),
+		"width":           p["width"],
+		"height":          p["height"],
+		"type":            p["type"],
+	})
+	if len(h) <= 4 && len(cdn) == 0 {
+		return nil
+	}
+	return h
+}
+
+func compactMap(m map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		switch x := v.(type) {
+		case nil:
+			continue
+		case string:
+			if x == "" {
+				continue
+			}
+		case int:
+			if x == 0 {
+				continue
+			}
+		case int64:
+			if x == 0 {
+				continue
+			}
+		case map[string]any:
+			if len(x) == 0 {
+				continue
+			}
+		case []string:
+			if len(x) == 0 {
+				continue
+			}
+		case []map[string]any:
+			if len(x) == 0 {
+				continue
+			}
+		case []any:
+			if len(x) == 0 {
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func stringMapValue(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func mapAny(v any) map[string]any {
+	switch x := v.(type) {
+	case map[string]any:
+		return x
+	default:
+		return nil
+	}
+}
+
+func stringSliceAny(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func mapSliceAny(v any) []map[string]any {
+	switch x := v.(type) {
+	case []map[string]any:
+		return x
+	case []any:
+		out := make([]map[string]any, 0, len(x))
+		for _, item := range x {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func appendUniquePathDetails(vals []map[string]any, extra ...map[string]any) []map[string]any {
+	seen := map[string]bool{}
+	for _, v := range vals {
+		if p, ok := v["path"].(string); ok && p != "" {
+			seen[p] = true
+		}
+	}
+	for _, v := range extra {
+		p, _ := v["path"].(string)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		vals = append(vals, v)
+	}
+	return vals
+}
+
+func appendUniqueAny(vals []any, extra any) []any {
+	key := fmt.Sprint(extra)
+	for _, v := range vals {
+		if fmt.Sprint(v) == key {
+			return vals
+		}
+	}
+	return append(vals, extra)
 }
 
 func (s *server) localMediaPaths(talker string, createTime int64, family, md5Value string, fileNames []string) []string {
@@ -1072,6 +4634,7 @@ func (s *server) localMediaPaths(talker string, createTime int64, family, md5Val
 	if md5Value != "" {
 		switch family {
 		case "image", "cover":
+			candidates = append(candidates, s.readableImageMatchesByMD5(createTime, md5Value)...)
 			base := filepath.Join(s.cfg.DBRoot, "msg", "attach", talkerHash(talker), month, "Img")
 			candidates = append(candidates,
 				filepath.Join(base, md5Value+".dat"),
@@ -1106,6 +4669,99 @@ func (s *server) localMediaPaths(talker string, createTime int64, family, md5Val
 		}
 	}
 	return out
+}
+
+type readableImageMatch struct {
+	path    string
+	timeGap int64
+}
+
+type readableImageCandidate struct {
+	path    string
+	modTime int64
+}
+
+func (s *server) readableImageMatchesByMD5(createTime int64, md5Value string) []string {
+	if s == nil || s.cfg == nil || s.cfg.DBRoot == "" {
+		return nil
+	}
+	target := strings.ToLower(strings.TrimSpace(md5Value))
+	if !md5LikeRe.MatchString(target) {
+		return nil
+	}
+	candidates := s.readableImageTempIndex()[target]
+	if len(candidates) == 0 {
+		return nil
+	}
+	matches := make([]readableImageMatch, 0, len(candidates))
+	for _, cand := range candidates {
+		gap := int64(0)
+		if createTime != 0 {
+			gap = cand.modTime - createTime
+			if gap < 0 {
+				gap = -gap
+			}
+		}
+		matches = append(matches, readableImageMatch{path: cand.path, timeGap: gap})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].timeGap != matches[j].timeGap {
+			return matches[i].timeGap < matches[j].timeGap
+		}
+		return matches[i].path < matches[j].path
+	})
+	return []string{matches[0].path}
+}
+
+func (s *server) readableImageTempIndex() map[string][]readableImageCandidate {
+	root := filepath.Join(s.cfg.DBRoot, "temp")
+	s.readableImageIndexMu.Lock()
+	defer s.readableImageIndexMu.Unlock()
+	if s.readableImageIndexRoot == root && s.readableImageIndex != nil && time.Since(s.readableImageIndexBuiltAt) < 5*time.Second {
+		return s.readableImageIndex
+	}
+	index := map[string][]readableImageCandidate{}
+	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+		s.readableImageIndexRoot = root
+		s.readableImageIndexBuiltAt = time.Now()
+		s.readableImageIndex = index
+		return index
+	}
+	const maxCandidateFiles = 2048
+	const maxCandidateSize = 50 << 20
+	var scanned int
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if !directImageExt(ext) {
+			return nil
+		}
+		scanned++
+		if scanned > maxCandidateFiles {
+			return filepath.SkipAll
+		}
+		st, err := d.Info()
+		if err != nil || st.Size() <= 0 || st.Size() > maxCandidateSize {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		sum := md5.Sum(b)
+		key := hex.EncodeToString(sum[:])
+		index[key] = append(index[key], readableImageCandidate{path: path, modTime: st.ModTime().Unix()})
+		return nil
+	})
+	s.readableImageIndexRoot = root
+	s.readableImageIndexBuiltAt = time.Now()
+	s.readableImageIndex = index
+	return index
 }
 
 func (s *server) resolveLooseChatArg(a map[string]any) (string, error) {
@@ -1271,6 +4927,8 @@ func mediaResourceFamily(rawType int64, baseKind int32, kindName string) string 
 	switch {
 	case baseKind == 3:
 		return "image"
+	case baseKind == 34:
+		return "voice"
 	case baseKind == 43:
 		return "video"
 	case kindName == "file":
@@ -1421,6 +5079,42 @@ func uniqueStrings(vals []string) []string {
 	seen := map[string]bool{}
 	for _, v := range vals {
 		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+func appendUniqueStrings(vals []string, extra ...string) []string {
+	if len(extra) == 0 {
+		return vals
+	}
+	seen := make(map[string]bool, len(vals)+len(extra))
+	for _, v := range vals {
+		if v != "" {
+			seen[v] = true
+		}
+	}
+	for _, v := range extra {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		vals = append(vals, v)
+	}
+	return vals
+}
+
+func uniqueInt64s(vals []int64) []int64 {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(vals))
+	seen := map[int64]bool{}
+	for _, v := range vals {
+		if seen[v] {
 			continue
 		}
 		seen[v] = true
@@ -2551,6 +6245,14 @@ func getBoolDefault(a map[string]any, k string, def bool) bool {
 	return def
 }
 
+func includeMediaPathsForMessages(a map[string]any) bool {
+	return getBoolDefault(a, "include_media_paths", true)
+}
+
+func includeDebugOutput(a map[string]any) bool {
+	return getBoolDefault(a, "include_debug", getBoolDefault(a, "debug", false))
+}
+
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
@@ -3063,6 +6765,19 @@ type xmlMsgImg struct {
 	} `xml:"img"`
 }
 
+type xmlMsgVoice struct {
+	XMLName  xml.Name `xml:"msg"`
+	VoiceMsg struct {
+		VoiceLength int64  `xml:"voicelength,attr"`
+		VoiceFormat int    `xml:"voiceformat,attr"`
+		Length      int64  `xml:"length,attr"`
+		EndFlag     int    `xml:"endflag,attr"`
+		CancelFlag  int    `xml:"cancelflag,attr"`
+		VoiceURL    string `xml:"voiceurl,attr"`
+		AesKey      string `xml:"aeskey,attr"`
+	} `xml:"voicemsg"`
+}
+
 type xmlMsgEmoji struct {
 	XMLName xml.Name `xml:"msg"`
 	Emoji   struct {
@@ -3076,13 +6791,60 @@ type xmlMsgEmoji struct {
 	} `xml:"emoji"`
 }
 
+type xmlMsgCard struct {
+	XMLName         xml.Name `xml:"msg"`
+	BigHeadImgURL   string   `xml:"bigheadimgurl,attr"`
+	SmallHeadImgURL string   `xml:"smallheadimgurl,attr"`
+	Username        string   `xml:"username,attr"`
+	Nickname        string   `xml:"nickname,attr"`
+	Sex             int      `xml:"sex,attr"`
+	Alias           string   `xml:"alias,attr"`
+	Province        string   `xml:"province,attr"`
+	City            string   `xml:"city,attr"`
+	Signature       string   `xml:"sign,attr"`
+	Scene           int      `xml:"scene,attr"`
+}
+
+type xmlMsgLocation struct {
+	XMLName  xml.Name `xml:"msg"`
+	Location struct {
+		X       float64 `xml:"x,attr"`
+		Y       float64 `xml:"y,attr"`
+		Scale   int     `xml:"scale,attr"`
+		Label   string  `xml:"label,attr"`
+		PoiName string  `xml:"poiname,attr"`
+	} `xml:"location"`
+}
+
 type xmlMsgAppmsg struct {
 	XMLName xml.Name `xml:"msg"`
 	AppMsg  struct {
-		Title    string          `xml:"title"`
-		Des      string          `xml:"des"`
-		URL      string          `xml:"url"`
-		Type     int             `xml:"type"`
+		Title             string `xml:"title"`
+		Des               string `xml:"des"`
+		URL               string `xml:"url"`
+		LowURL            string `xml:"lowurl"`
+		Type              int    `xml:"type"`
+		SourceUsername    string `xml:"sourceusername"`
+		SourceDisplayName string `xml:"sourcedisplayname"`
+		ThumbURL          string `xml:"thumburl"`
+		AppAttach         struct {
+			TotalLen int64  `xml:"totallen"`
+			AttachID string `xml:"attachid"`
+			FileExt  string `xml:"fileext"`
+			AesKey   string `xml:"aeskey"`
+		} `xml:"appattach"`
+		WcPayInfo struct {
+			FeeDesc       string `xml:"feedesc"`
+			Description   string `xml:"description"`
+			PaySubType    int    `xml:"paysubtype"`
+			PayMemo       string `xml:"pay_memo"`
+			SenderTitle   string `xml:"sendertitle"`
+			ReceiverTitle string `xml:"receivertitle"`
+			SceneText     string `xml:"scenetext"`
+			TemplateID    string `xml:"templateid"`
+			InnerType     int    `xml:"innertype"`
+			NativeURL     string `xml:"nativeurl"`
+		} `xml:"wcpayinfo"`
 		ReferMsg *xmlMsgReferMsg `xml:"refermsg"`
 	} `xml:"appmsg"`
 }
@@ -3242,6 +7004,37 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 			"mid_width":     m.Img.CdnMidWidth,
 			"mid_height":    m.Img.CdnMidHeight,
 		}
+	case 34:
+		var m xmlMsgVoice
+		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
+			return map[string]any{"parse_error": err.Error(), "kind": "voice"}
+		}
+		return compactMap(map[string]any{
+			"duration_ms":  m.VoiceMsg.VoiceLength,
+			"voice_format": m.VoiceMsg.VoiceFormat,
+			"length":       m.VoiceMsg.Length,
+			"endflag":      m.VoiceMsg.EndFlag,
+			"cancelflag":   m.VoiceMsg.CancelFlag,
+			"voice_url":    m.VoiceMsg.VoiceURL,
+			"aeskey":       m.VoiceMsg.AesKey,
+		})
+	case 42:
+		var m xmlMsgCard
+		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
+			return map[string]any{"parse_error": err.Error(), "kind": "card"}
+		}
+		return map[string]any{
+			"username":           m.Username,
+			"nickname":           m.Nickname,
+			"alias":              m.Alias,
+			"small_head_img_url": m.SmallHeadImgURL,
+			"big_head_img_url":   m.BigHeadImgURL,
+			"province":           m.Province,
+			"city":               m.City,
+			"signature":          m.Signature,
+			"sex":                m.Sex,
+			"scene":              m.Scene,
+		}
 	case 47:
 		var m xmlMsgEmoji
 		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
@@ -3256,16 +7049,53 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 			"height":      m.Emoji.Height,
 			"type":        m.Emoji.Type,
 		}
+	case 48:
+		var m xmlMsgLocation
+		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
+			return map[string]any{"parse_error": err.Error(), "kind": "location"}
+		}
+		return map[string]any{
+			"latitude":  m.Location.X,
+			"longitude": m.Location.Y,
+			"scale":     m.Location.Scale,
+			"label":     m.Location.Label,
+			"poiname":   m.Location.PoiName,
+		}
 	case 49:
 		var m xmlMsgAppmsg
 		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
 			return map[string]any{"parse_error": err.Error(), "kind": "app"}
 		}
 		out := map[string]any{
-			"app_subtype": m.AppMsg.Type,
-			"title":       m.AppMsg.Title,
-			"des":         m.AppMsg.Des,
-			"url":         m.AppMsg.URL,
+			"app_subtype":         m.AppMsg.Type,
+			"title":               m.AppMsg.Title,
+			"des":                 m.AppMsg.Des,
+			"url":                 firstNonEmpty(m.AppMsg.URL, m.AppMsg.LowURL),
+			"source_username":     m.AppMsg.SourceUsername,
+			"source_display_name": m.AppMsg.SourceDisplayName,
+			"thumb_url":           m.AppMsg.ThumbURL,
+		}
+		if m.AppMsg.AppAttach.TotalLen != 0 || m.AppMsg.AppAttach.AttachID != "" || m.AppMsg.AppAttach.FileExt != "" {
+			out["app_attach"] = compactMap(map[string]any{
+				"total_len": m.AppMsg.AppAttach.TotalLen,
+				"attach_id": m.AppMsg.AppAttach.AttachID,
+				"file_ext":  m.AppMsg.AppAttach.FileExt,
+			})
+		}
+		if m.AppMsg.WcPayInfo.FeeDesc != "" || m.AppMsg.WcPayInfo.SenderTitle != "" ||
+			m.AppMsg.WcPayInfo.ReceiverTitle != "" || m.AppMsg.WcPayInfo.NativeURL != "" {
+			out["wcpayinfo"] = compactMap(map[string]any{
+				"feedesc":       m.AppMsg.WcPayInfo.FeeDesc,
+				"description":   m.AppMsg.WcPayInfo.Description,
+				"paysubtype":    m.AppMsg.WcPayInfo.PaySubType,
+				"pay_memo":      m.AppMsg.WcPayInfo.PayMemo,
+				"sendertitle":   m.AppMsg.WcPayInfo.SenderTitle,
+				"receivertitle": m.AppMsg.WcPayInfo.ReceiverTitle,
+				"scenetext":     m.AppMsg.WcPayInfo.SceneText,
+				"templateid":    m.AppMsg.WcPayInfo.TemplateID,
+				"innertype":     m.AppMsg.WcPayInfo.InnerType,
+				"nativeurl":     m.AppMsg.WcPayInfo.NativeURL,
+			})
 		}
 		if subtype == 19 {
 			items, err := wxparse.ForwardItems(raw, depth)
@@ -3296,6 +7126,8 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 	return nil
 }
 
+const messageContentParseDepth = 5
+
 // enrichMessages augments raw message rows with packed-type decoding, a
 // structured message_content_parsed sibling field, and a one-line
 // content_summary suitable for agent display. Raw local_type and
@@ -3312,7 +7144,7 @@ func enrichMessages(rows []wcdb.Row) []wcdb.Row {
 		row["kind_name"] = name
 		content, _ := row["message_content"].(string)
 		if content != "" {
-			if parsed := parseMessageContent(baseKind, subtype, content, 3); parsed != nil {
+			if parsed := parseMessageContent(baseKind, subtype, content, messageContentParseDepth); parsed != nil {
 				row["message_content_parsed"] = parsed
 			}
 		}
@@ -3341,26 +7173,61 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any) string {
 	case 3:
 		return "[图片]"
 	case 34:
+		if p, _ := parsed.(map[string]any); p != nil {
+			if ms, ok := integerArgValue(p["duration_ms"]); ok && ms > 0 {
+				return fmt.Sprintf("[语音] %.1fs", float64(ms)/1000)
+			}
+		}
 		return "[语音]"
+	case 42:
+		if p, _ := parsed.(map[string]any); p != nil {
+			if name := firstNonEmpty(stringMapValue(p, "nickname"), stringMapValue(p, "username")); name != "" {
+				return "[名片] " + name
+			}
+		}
+		return "[名片]"
 	case 43:
 		return "[视频]"
 	case 47:
 		return "[表情]"
+	case 48:
+		if p, _ := parsed.(map[string]any); p != nil {
+			if label := firstNonEmpty(stringMapValue(p, "label"), stringMapValue(p, "poiname")); label != "" {
+				return "[位置] " + label
+			}
+		}
+		return "[位置]"
 	case 49:
 		p, _ := parsed.(map[string]any)
 		if p == nil {
 			return "[应用消息]"
 		}
 		title, _ := p["title"].(string)
+		wcpay := mapAny(p["wcpayinfo"])
+		switch subtype {
+		case 2000:
+			return firstNonEmpty(stringMapValue(p, "des"), stringMapValue(wcpay, "description"), stringMapValue(wcpay, "feedesc"), "[转账]")
+		case 2001:
+			return firstNonEmpty(stringMapValue(wcpay, "sendertitle"), title, "[红包]")
+		}
 		if subtype == 57 {
 			quoted := "..."
 			if r, ok := p["refermsg"].(map[string]any); ok {
 				refType := int32(0)
 				if t, ok := r["type"].(int); ok {
 					refType = int32(t)
+				} else if t, ok := integerArgValue(r["type"]); ok {
+					refType = int32(t)
 				}
 				refRaw, _ := r["content_raw"].(string)
-				quoted = contentSummary(refType, 0, refRaw, r["content_parsed"])
+				refParsed := mapAny(r["content_parsed"])
+				refSubtype := int32(0)
+				if refType == 49 {
+					if n, ok := integerArgValue(refParsed["app_subtype"]); ok {
+						refSubtype = int32(n)
+					}
+				}
+				quoted = contentSummary(refType, refSubtype, refRaw, refParsed)
 			}
 			if title != "" {
 				return "[引用: " + quoted + "] " + title
@@ -3371,6 +7238,8 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any) string {
 			return title
 		}
 		return "[应用消息]"
+	case 50:
+		return "[通话]"
 	case 10000:
 		return raw
 	}

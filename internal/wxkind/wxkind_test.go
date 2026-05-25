@@ -12,21 +12,23 @@ func TestResolve(t *testing.T) {
 		{34, 0, "voice"},
 		{43, 0, "video"},
 		{47, 0, "sticker"},
-		{49, 0, "app"},        // base_kind=49 with unknown subtype falls back to "app"
-		{49, 57, "quote"},     // refermsg
+		{49, 0, "app"},    // base_kind=49 with unknown subtype falls back to "app"
+		{49, 57, "quote"}, // refermsg
 		{49, 2000, "transfer"},
 		{49, 2001, "red_packet"},
 		{49, 5, "link"},
 		{49, 19, "forward_chat"},
 		{49, 33, "miniprogram"},
 		{49, 36, "miniprogram"},
+		{49, 53, "solitaire"},
 		{49, 87, "announcement"},
 		{49, 62, "pat"},
+		{49, 76, "music"},
 		{42, 0, "card"},
 		{48, 0, "location"},
 		{50, 0, "voip"},
 		{10000, 0, "system"},
-		{999, 0, "unknown"},   // unknown base_kind
+		{999, 0, "unknown"}, // unknown base_kind
 	}
 	for _, c := range cases {
 		got := Resolve(c.bk, c.st)

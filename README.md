@@ -232,6 +232,10 @@ watcher 是 launchd user agent (`com.r266.wx-mcp-cache-watcher`), 默认每 300 
 wx-mcp sessions --type-filter private,group
 wx-mcp resolve-chat "张三"
 wx-mcp history "张三" --limit 50
+wx-mcp timeline "张三" --limit 10               # 首选: 最近 10 条, 按聊天顺序展示, 含 query/freshness/messages
+wx-mcp history "张三" --limit 10 --view agent   # 低噪声 rows: id/time/sender/kind/text + 非文本结构
+wx-mcp history "张三" --limit 20 --type image
+wx-mcp history "张三" --limit 20 --include-media-paths=false  # 只要消息文本/摘要时关闭媒体材料
 wx-mcp media "张三" --type image --limit 10
 wx-mcp search "关键词" --in "某群" --after 2026-01-01 --type text
 wx-mcp search "关键词" --after 2026-01-01      # 跨聊天/跨年份关键词搜索, 走微信 live FTS
@@ -246,7 +250,11 @@ wx-mcp sns-notifications --include-read
 
 CLI 和 MCP 走同一套工具逻辑: 名称/会话走 metadata cache, 聊天正文默认 live read.
 
-## Tools (24 个)
+### 媒体解码
+
+默认 agent 输出遵循一个原则: 人类在微信 UI 中能看到、且影响理解的信息, MCP 默认也要给 agent; 协议码、CDN/aeskey、不可读 `.dat`、raw XML、重复候选路径等实现材料下沉到 `include_debug=true` / `fields=full` / `media_resources`. 图片和视频默认只返回 agent 可直接读取的本地 `path`; 如果微信 V4 图片缺 `image_key` 无法解码, 默认只返回 concise warning, 不把不可读 `.dat` 当作图片给 agent. 语音默认从 `media_0.db/VoiceInfo` 取本机音频, 尝试转成 ASR 可读音频并优先用本机 `faster-whisper large-v3` 生成 `voice.transcript`; 原始 SILK/WAV 路径只在 debug/media_resources 路径里追证. 表情包本版本只保留基础提示, 不做默认可视化展开.
+
+## Tools (25 个)
 
 所有时间字段接 unix秒 或 `2006-01-02` (本地时区).
 
@@ -255,8 +263,9 @@ CLI 和 MCP 走同一套工具逻辑: 名称/会话走 metadata cache, 聊天正
 | `sessions` | 会话列表 (按 sort_timestamp DESC). 字段: username / display_name / chat_type / unread_count / summary / sort_timestamp / last_timestamp / last_sender_wxid / last_sender_display_name / last_msg_type / last_msg_sub_type / last_msg_kind_name. 支持 type_filter (private/group/official_account/folded/bot, 可逗号分隔) + keyword 模糊搜索 |
 | `resolve_chat` | 把昵称/备注/alias/群名解析成 username/talker. 返回 candidates, 供 agent 从自然语言目标进入精确工具调用 |
 | `contacts` | 联系人/群搜索. 字段: username / display_name / nick_name / remark (omitempty) / alias (omitempty) / description (omitempty) / type / chat_type / is_verified |
-| `messages` | 消息. talker 可传 wxid; chat 可传昵称/备注/群名自动解析. fields=lite (默认) 返回核心字段; fields=full 加 subtype + raw message_content + message_content_parsed (XML 结构化, 引用递归 depth=3). content_summary 已剥群聊 sender prefix |
-| `media_resources` | 消息附件/媒体资源定位. 从 `message_resource.db` 返回 `server_id_str`、图片/视频/文件/封面资源的 raw type、variant_code、size、status、packed_strings(文件名/md5) 和已存在的本地 `local_paths`. 支持 chat/talker/local_id/server_id/server_id_str/type/resource_family 过滤 |
+| `chat_timeline` | 普通查消息首选入口. 自动解析 `chat`, live 读取最近消息, 默认取最近 N 条并按聊天顺序输出 (`order=desc` + `display_order=asc`). 返回对象: `query` / `freshness` / `messages`; 每条 message 含稳定 `id(local_id/server_id_str/talker)`、`sender_wxid`、`is_from_me`、`kind`、`text`、display-ready 非文本结构和轻量 `warnings`; `forward_chat.items` 递归展开到 depth 5 |
+| `messages` | 低层消息入口. talker 可传 wxid; chat 可传昵称/备注/群名自动解析. `view=agent` 返回同一套低噪声 message rows: `id` / `time` / `sender` / `sender_wxid` / `is_from_me` / `kind` / `text` / `images` / `videos` / `files` / `voice.transcript` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` / `transfer` / `red_packet` / `location` / `solitaire` / `warnings`. 图片/视频默认只给可直接读取的本地 path; 语音默认给本地 ASR transcript, 不默认暴露 SILK. 合并转发在 agent view 里递归输出 `items` 到 depth 5, 嵌套图片/链接/文件/引用挂在对应 item 上; 引用消息的 `quote` 复用被引用原消息可见 payload. 默认 `fields=lite` 返回兼容核心字段、`display` 对象和结构化非文本 refs, 含 `server_id_str` 防 64-bit JSON 精度丢失; 默认隐藏 `media_resources` / `media_read_hints` / CDN/aeskey / `.dat` 解码细节. 正常 agent 不需要 `fields=full`; `include_debug=true` / `debug=true` 或 `fields=full` 仅用于维护者诊断 raw XML / parser / media internals. content_summary 已剥群聊 sender prefix |
+| `media_resources` | 消息附件/媒体资源定位. 从 `message_resource.db` 返回 `server_id_str`、图片/视频/文件/封面资源的 raw type、variant_code、size、status、packed_strings(文件名/md5)、本地 `local_paths` / `local_path_uris` / `local_path_details`、`decoded_local_paths` 和 `media_read_hints`. 图片会补查消息 XML 的真实 md5, 命中本机 temp PNG/JPG 时优先返回 `direct_readable_local_paths`; `.dat` 会 best-effort 解码到 `~/.wx-mcp/media-cache`; 微信 V4 图片缺 `image_key` 时 `direct_readable=false` 且 `decode_status=needs_image_key`. 支持 chat/talker/local_id/server_id/server_id_str/type/resource_family 过滤 |
 | `group_members` | 群成员. chatroom_id 可传群 ID; chat 可传群名自动解析. is_owner / is_friend 是 bool. stats=true 附 msg_count |
 | `sns` | 朋友圈 + 点赞/评论. 字段: tid / username / nickname / avatar_url / create_time / content / type / private / liked_by_me / media (含 raw_type/sub_type/url_key/thumb_key/md5/width/height/total_size/video_md5/video_duration) / location / likes / comments |
 | `sns_feed` | 朋友圈时间线, 语义化 alias, 字段同 sns |
@@ -284,8 +293,8 @@ CLI 和 MCP 走同一套工具逻辑: 名称/会话走 metadata cache, 聊天正
 `local_type` 是 packed int64: `(subtype << 32) | base_kind`. messages tool 已拆出 `base_kind` / `subtype` / `kind_name`, lite mode 隐藏 raw `local_type`.
 
 - `base_kind`: 1=text / 3=image / 34=voice / 42=card / 43=video / 47=sticker / 48=location / 49=app / 50=voip / 10000=system
-- `kind_name` 在 `base_kind=49` 时按 subtype 细化: 3=music / 5=link / 6,8,24=file / 19=forward_chat / 33,36=miniprogram / 49=link / 51=channel_video / 57=quote / 62=pat / 87=announcement / 2000=transfer / 2001=red_packet
-- 引用消息 (subtype=57) 时 `message_content_parsed.refermsg` 含完整 quote 上下文 + 可递归 decode 的 content_parsed (depth≤3)
+- `kind_name` 在 `base_kind=49` 时按 subtype 细化: 3,76=music / 5=link / 6,8,24=file / 19=forward_chat / 33,36=miniprogram / 49=link / 51=channel_video / 53=solitaire / 57=quote / 62=pat / 87=announcement / 2000=transfer / 2001=red_packet
+- 引用消息 (subtype=57) 时 `quote` 默认给 agent 可见的被引用消息 payload; `message_content_parsed.refermsg` 仍保留完整 quote 上下文 + 可递归 decode 的 content_parsed (depth≤5) 供 debug/full 使用
 
 ### 跨表 join key
 
@@ -364,6 +373,12 @@ wx-mcp-v1.5.2-windows-amd64/
 ```
 
 ## Changelog
+
+### Unreleased
+- `chat_timeline` 高层工具返回 `query` / `freshness` / `messages` envelope, 普通查消息无需 `fields=full`.
+- `messages(view=agent)` 每条消息保留稳定 `id(local_id/server_id_str/talker)`、`sender_wxid` / `is_from_me`, 并结构化输出链接、音乐、小程序、文件、图片、视频、引用、合并转发、转账、红包、位置、接龙等非文本消息.
+- `messages(view=agent)` 默认把语音从 `media_0.db/VoiceInfo` 送本地 ASR 后返回 `voice.transcript`, 不默认暴露 SILK; 图片/视频默认只给可直接读取的本机 path; 合并转发递归展开到 depth 5, 引用消息复用被引用原消息的可见 payload.
+- `messages` 增加 `order` / `display_order`、`include_debug` / `debug`, 并让 `fields=lite` 默认隐藏媒体调试字段, 只保留 display-ready 引用和 concise warnings.
 
 ### v1.5.2 (2026-05-21)
 - metadata refresh 期间如果 contact/session 源 DB 又变化, 普通查询静默使用最近一次完成的 metadata snapshot, 不再向用户输出容易误解为失败的 warning.

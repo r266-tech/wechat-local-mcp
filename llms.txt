@@ -55,8 +55,9 @@ Primary MCP tools:
 
 - sessions
 - resolve_chat
-- messages
-- media_resources
+- chat_timeline (preferred normal chat-reading tool; resolves chat names, reads live messages, defaults to newest window in chronological display order, and returns query/freshness/messages)
+- messages (use view=agent for low-noise rows with stable id, sender_wxid/is_from_me, time/sender/kind/text, and display-ready images/videos/files/voice.transcript/link/music/miniprogram/forward_chat/quote/transfer/red_packet/location/solitaire/warnings; default agent output returns WeChat UI-visible semantics, directly readable image/video/file paths, and local ASR voice transcripts, preferring faster-whisper large-v3, while keeping raw SILK, unreadable .dat, CDN/aeskey, protocol codes, and raw XML in debug/full/media_resources; forward_chat is recursively expanded to depth 5; quote carries the referenced message's visible payload; fields=full is maintainer diagnostics only, not normal chat reading; pass include_media_paths=false for text-only results)
+- media_resources (returns local_paths, local_path_uris, local_path_details with direct_readable/decode_status, direct_readable_local_paths for matched temp PNG/JPG image copies, decoded_local_paths when possible, and media_read_hints; wx-mcp does not perform visual recognition)
 - search
 - unread
 - stats

@@ -139,32 +139,88 @@ type xmlForwardItem struct {
 	DataType         int    `xml:"datatype,attr"`
 	DataID           string `xml:"dataid,attr"`
 	SourceName       string `xml:"sourcename"`
+	SourceHeadURL    string `xml:"sourceheadurl"`
 	SourceTime       string `xml:"sourcetime"`
 	DataTitle        string `xml:"datatitle"`
 	DataDesc         string `xml:"datadesc"`
 	DataFmt          string `xml:"datafmt"`
 	FullMD5          string `xml:"fullmd5"`
 	DataSize         int64  `xml:"datasize"`
+	CDNThumbURL      string `xml:"cdnthumburl"`
+	CDNThumbKey      string `xml:"cdnthumbkey"`
+	ThumbFullMD5     string `xml:"thumbfullmd5"`
+	ThumbSize        int64  `xml:"thumbsize"`
+	CDNDataURL       string `xml:"cdndataurl"`
+	CDNDataKey       string `xml:"cdndatakey"`
+	StreamWebURL     string `xml:"streamweburl"`
+	Link             string `xml:"link"`
 	SrcMsgLocalID    int64  `xml:"srcMsgLocalid"`
 	SrcMsgCreateTime int64  `xml:"srcMsgCreateTime"`
-	RawInner         string `xml:",innerxml"`
+	MessageUUID      string `xml:"messageuuid"`
+	FromNewMsgID     string `xml:"fromnewmsgid"`
+	WebURLItem       struct {
+		ThumbURL        string `xml:"thumburl"`
+		Title           string `xml:"title"`
+		AppMsgShareItem struct {
+			SrcUsername    string `xml:"srcusername"`
+			SrcDisplayName string `xml:"srcdisplayname"`
+		} `xml:"appmsgshareitem"`
+	} `xml:"weburlitem"`
+	ReferMsgItem *xmlForwardReferMsgItem `xml:"refermsgitem"`
+	RawInner     string                  `xml:",innerxml"`
+}
+
+type xmlForwardReferMsgItem struct {
+	Type        int    `xml:"type"`
+	SvrID       string `xml:"svrid"`
+	DisplayName string `xml:"displayname"`
+	Content     string `xml:"content"`
+	ReferDesc   string `xml:"referdesc"`
+}
+
+type ForwardReferMsg struct {
+	Type        int    `json:"type,omitempty"`
+	SvrID       string `json:"svrid,omitempty"`
+	DisplayName string `json:"displayname,omitempty"`
+	Content     string `json:"content,omitempty"`
+	ReferDesc   string `json:"referdesc,omitempty"`
+}
+
+type ForwardLink struct {
+	URL               string `json:"url,omitempty"`
+	Title             string `json:"title,omitempty"`
+	ThumbURL          string `json:"thumb_url,omitempty"`
+	SourceUsername    string `json:"source_username,omitempty"`
+	SourceDisplayName string `json:"source_display_name,omitempty"`
 }
 
 // ForwardItem is a JSON-serializable view of one forwarded sub-message.
 // Only populated fields are emitted (omitempty) so text items don't carry
 // file-specific keys. NestedItems is set for datatype=17 (合并转发 nested).
 type ForwardItem struct {
-	DataType         int           `json:"datatype"`
-	SourceName       string        `json:"sourcename,omitempty"`
-	SourceTime       string        `json:"sourcetime,omitempty"`
-	DataTitle        string        `json:"datatitle,omitempty"`
-	DataDesc         string        `json:"datadesc,omitempty"`
-	DataFmt          string        `json:"datafmt,omitempty"`
-	FullMD5          string        `json:"fullmd5,omitempty"`
-	DataSize         int64         `json:"datasize,omitempty"`
-	SrcMsgLocalID    int64         `json:"src_msg_localid,omitempty"`
-	SrcMsgCreateTime int64         `json:"src_msg_create_time,omitempty"`
-	NestedItems      []ForwardItem `json:"nested_items,omitempty"`
+	DataType         int              `json:"datatype"`
+	DataID           string           `json:"dataid,omitempty"`
+	SourceName       string           `json:"sourcename,omitempty"`
+	SourceHeadURL    string           `json:"sourceheadurl,omitempty"`
+	SourceTime       string           `json:"sourcetime,omitempty"`
+	DataTitle        string           `json:"datatitle,omitempty"`
+	DataDesc         string           `json:"datadesc,omitempty"`
+	DataFmt          string           `json:"datafmt,omitempty"`
+	FullMD5          string           `json:"fullmd5,omitempty"`
+	DataSize         int64            `json:"datasize,omitempty"`
+	CDNThumbURL      string           `json:"cdnthumburl,omitempty"`
+	CDNThumbKey      string           `json:"cdnthumbkey,omitempty"`
+	ThumbFullMD5     string           `json:"thumbfullmd5,omitempty"`
+	ThumbSize        int64            `json:"thumbsize,omitempty"`
+	CDNDataURL       string           `json:"cdndataurl,omitempty"`
+	CDNDataKey       string           `json:"cdndatakey,omitempty"`
+	SrcMsgLocalID    int64            `json:"src_msg_localid,omitempty"`
+	SrcMsgCreateTime int64            `json:"src_msg_create_time,omitempty"`
+	MessageUUID      string           `json:"messageuuid,omitempty"`
+	FromNewMsgID     string           `json:"fromnewmsgid,omitempty"`
+	Link             *ForwardLink     `json:"link,omitempty"`
+	ReferMsg         *ForwardReferMsg `json:"refermsg,omitempty"`
+	NestedItems      []ForwardItem    `json:"nested_items,omitempty"`
 	// ParseError surfaces nested-forward (datatype=17) parse failure on this
 	// item without losing the rest of the outer forward. Outer-XML parser
 	// drift propagates as ForwardItems' returned error instead.
@@ -207,15 +263,46 @@ func parseRecordInfo(recordXML string, depth int) ([]ForwardItem, error) {
 	for _, it := range ri.DataItems {
 		fi := ForwardItem{
 			DataType:         it.DataType,
+			DataID:           it.DataID,
 			SourceName:       it.SourceName,
+			SourceHeadURL:    it.SourceHeadURL,
 			SourceTime:       it.SourceTime,
 			DataTitle:        it.DataTitle,
 			DataDesc:         it.DataDesc,
 			DataFmt:          it.DataFmt,
 			FullMD5:          it.FullMD5,
 			DataSize:         it.DataSize,
+			CDNThumbURL:      it.CDNThumbURL,
+			CDNThumbKey:      it.CDNThumbKey,
+			ThumbFullMD5:     it.ThumbFullMD5,
+			ThumbSize:        it.ThumbSize,
+			CDNDataURL:       it.CDNDataURL,
+			CDNDataKey:       it.CDNDataKey,
 			SrcMsgLocalID:    it.SrcMsgLocalID,
 			SrcMsgCreateTime: it.SrcMsgCreateTime,
+			MessageUUID:      it.MessageUUID,
+			FromNewMsgID:     it.FromNewMsgID,
+		}
+		if link := strings.TrimSpace(firstNonEmpty(it.Link, it.StreamWebURL)); link != "" ||
+			strings.TrimSpace(it.WebURLItem.Title) != "" ||
+			strings.TrimSpace(it.WebURLItem.ThumbURL) != "" ||
+			strings.TrimSpace(it.WebURLItem.AppMsgShareItem.SrcDisplayName) != "" {
+			fi.Link = &ForwardLink{
+				URL:               link,
+				Title:             it.WebURLItem.Title,
+				ThumbURL:          it.WebURLItem.ThumbURL,
+				SourceUsername:    it.WebURLItem.AppMsgShareItem.SrcUsername,
+				SourceDisplayName: it.WebURLItem.AppMsgShareItem.SrcDisplayName,
+			}
+		}
+		if it.ReferMsgItem != nil {
+			fi.ReferMsg = &ForwardReferMsg{
+				Type:        it.ReferMsgItem.Type,
+				SvrID:       it.ReferMsgItem.SvrID,
+				DisplayName: it.ReferMsgItem.DisplayName,
+				Content:     it.ReferMsgItem.Content,
+				ReferDesc:   it.ReferMsgItem.ReferDesc,
+			}
 		}
 		if it.DataType == 17 && depth > 0 {
 			if nested := extractNestedRecordInfo(it.RawInner); nested != "" {
@@ -245,4 +332,13 @@ func extractNestedRecordInfo(inner string) string {
 		return ""
 	}
 	return inner[start : start+end+len("</recordinfo>")]
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

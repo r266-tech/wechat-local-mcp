@@ -21,6 +21,7 @@ type Config struct {
 	Wxid          string            `json:"wxid"`
 	DBRoot        string            `json:"db_root"`
 	Keys          map[string]string `json:"keys,omitempty"`
+	ImageKey      string            `json:"image_key,omitempty"`
 	Key           string            `json:"key,omitempty"`
 	KeyPID        int               `json:"key_pid,omitempty"`
 	KeyEpoch      int64             `json:"key_epoch,omitempty"`
@@ -104,6 +105,9 @@ func applyEnvOverrides(c *Config) {
 		if c.Wxid == "" {
 			c.Wxid = wxidFromAccountDir(c.DBRoot)
 		}
+	}
+	if key := strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")); key != "" {
+		c.ImageKey = key
 	}
 }
 

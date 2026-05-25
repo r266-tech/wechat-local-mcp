@@ -185,6 +185,32 @@ func TestForwardItems(t *testing.T) {
 	}
 }
 
+const forwardRichSample = `<msg><appmsg><type>19</type><recorditem><![CDATA[<recordinfo><datalist count="2"><dataitem datatype="5" dataid="link1"><streamweburl>https://mp.weixin.qq.com/s/test</streamweburl><link>https://mp.weixin.qq.com/s/test</link><sourcename>V</sourcename><sourcetime>2026-05-22 16:56</sourcetime><fromnewmsgid>6241033583148630707</fromnewmsgid><weburlitem><thumburl>https://example.test/thumb.jpg</thumburl><title>一文搞懂如何在Codex中使用goals</title><appmsgshareitem><srcusername>gh_7e5d9d010744</srcusername><srcdisplayname>AI寒武纪</srcdisplayname></appmsgshareitem></weburlitem></dataitem><dataitem datatype="1" dataid="quote1"><datadesc>不错</datadesc><sourcename>白日做梦</sourcename><refermsgitem><type>48</type><svrid>1841310816813489186</svrid><displayname>V</displayname><content>&lt;msg&gt;&lt;location x="27.452047" y="114.178642" label="山顶" poiname="金顶"/&gt;&lt;/msg&gt;</content><referdesc>金顶</referdesc></refermsgitem></dataitem></datalist></recordinfo>]]></recorditem></appmsg></msg>`
+
+func TestForwardItems_RichLinkAndQuote(t *testing.T) {
+	items, err := ForwardItems(forwardRichSample, 3)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len = %d, want 2", len(items))
+	}
+	if items[0].Link == nil || items[0].Link.URL != "https://mp.weixin.qq.com/s/test" ||
+		items[0].Link.Title != "一文搞懂如何在Codex中使用goals" ||
+		items[0].Link.SourceDisplayName != "AI寒武纪" {
+		t.Fatalf("link item = %+v", items[0])
+	}
+	if items[0].FromNewMsgID != "6241033583148630707" {
+		t.Fatalf("fromnewmsgid = %q", items[0].FromNewMsgID)
+	}
+	if items[1].ReferMsg == nil || items[1].ReferMsg.Type != 48 ||
+		items[1].ReferMsg.SvrID != "1841310816813489186" ||
+		items[1].ReferMsg.ReferDesc != "金顶" ||
+		items[1].ReferMsg.Content == "" {
+		t.Fatalf("refermsg item = %+v", items[1].ReferMsg)
+	}
+}
+
 func TestForwardItems_Malformed(t *testing.T) {
 	items, err := ForwardItems("not xml", 3)
 	if err == nil {
