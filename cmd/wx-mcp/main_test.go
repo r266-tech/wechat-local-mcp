@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -669,11 +671,15 @@ func TestVoiceTranscriptUsesConfiguredLocalASRAndCache(t *testing.T) {
 	if err := os.WriteFile(wav, []byte("RIFF0000WAVEfmt "), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(dir, "asr.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '本地转写成功\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", script+" {audio}")
+	asr := buildTestBinary(t, dir, "asr", `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("本地转写成功")
+}
+`)
+	t.Setenv("WX_MCP_VOICE_TRANSCRIBE_CMD", shellQuote(asr)+" {audio}")
 
 	srv := &server{}
 	got := srv.voiceTranscriptForAgent(wav)
@@ -698,15 +704,26 @@ func TestVoiceTranscriptPrefersFasterWhisperLargeV3AndRefreshesOldCache(t *testi
 		t.Fatal(err)
 	}
 
-	logPath := filepath.Join(dir, "args.log")
-	python := filepath.Join(dir, "python3")
-	script := "#!/bin/sh\n" +
-		"if [ \"$#\" -gt 2 ]; then\n" +
-		"  printf '%s\\n' \"$4/$5\" > " + shellQuote(logPath) + "\n" +
-		"  printf '大模型转写成功\\n'\n" +
-		"fi\n"
-	if err := os.WriteFile(python, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
+	python := buildTestBinary(t, dir, "python3", `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	args := os.Args
+	if len(args) == 3 && args[1] == "-c" && args[2] == "import faster_whisper" {
+		return
+	}
+	if len(args) > 5 {
+		_ = os.WriteFile(args[0]+".args.log", []byte(args[4]+"/"+args[5]+"\n"), 0o600)
+		fmt.Println("大模型转写成功")
+	}
+}
+`)
+	if _, err := os.Stat(python + ".args.log"); err == nil {
+		t.Fatalf("unexpected stale args log at %s", python+".args.log")
 	}
 	t.Setenv("WX_MCP_FASTER_WHISPER_PYTHON", python)
 	t.Setenv("WX_MCP_FASTER_WHISPER_MODEL", "")
@@ -721,13 +738,30 @@ func TestVoiceTranscriptPrefersFasterWhisperLargeV3AndRefreshesOldCache(t *testi
 	if version, ok := integerArgValue(got["cache_version"]); !ok || version != voiceTranscriptCacheVersion {
 		t.Fatalf("cache version = %#v, want %d", got["cache_version"], voiceTranscriptCacheVersion)
 	}
-	args, err := os.ReadFile(logPath)
+	args, err := os.ReadFile(python + ".args.log")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(string(args)) != "large-v3/zh" {
 		t.Fatalf("faster-whisper args = %q, want large-v3/zh", strings.TrimSpace(string(args)))
 	}
+}
+
+func buildTestBinary(t *testing.T, dir, name, source string) string {
+	t.Helper()
+	src := filepath.Join(dir, name+".go")
+	if err := os.WriteFile(src, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, name)
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-trimpath", "-o", out, src)
+	if data, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build %s: %v\n%s", name, err, data)
+	}
+	return out
 }
 
 func TestAgentPayloadHidesProtocolFieldsByDefault(t *testing.T) {

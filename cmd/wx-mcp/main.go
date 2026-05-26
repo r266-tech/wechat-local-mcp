@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -4738,11 +4739,25 @@ func runConfiguredVoiceTranscriber(command, audioPath string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "/bin/sh", "-c", command).Output()
+	out, err := runShellCommandOutput(ctx, command)
 	return string(out), err
 }
 
+func runShellCommandOutput(ctx context.Context, command string) ([]byte, error) {
+	if runtime.GOOS == "windows" {
+		shell := strings.TrimSpace(os.Getenv("COMSPEC"))
+		if shell == "" {
+			shell = "cmd.exe"
+		}
+		return exec.CommandContext(ctx, shell, "/C", command).Output()
+	}
+	return exec.CommandContext(ctx, "/bin/sh", "-c", command).Output()
+}
+
 func shellQuote(s string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
