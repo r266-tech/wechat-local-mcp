@@ -1,6 +1,6 @@
 {
   "name": "wechat-cli",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "CLI-first local WeChat 4.x data reader for macOS and Windows, with an optional legacy MCP stdio adapter.",
   "homepage": "https://github.com/r266-tech/wechat-local-mcp",
   "license": "MIT",

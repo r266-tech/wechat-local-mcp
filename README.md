@@ -22,7 +22,10 @@ Windows:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"
 ```
 
-默认安装的是 CLI，不注册 MCP，不装后台 watcher。
+默认安装的是 CLI，不注册 MCP，不装后台 watcher。安装完成后命令会放到用户 PATH 上：
+
+- macOS: `~/.local/bin/wechat-cli`
+- Windows: `%LOCALAPPDATA%\Microsoft\WindowsApps\wechat-cli.cmd`，如该目录不存在则使用 `%USERPROFILE%\.local\bin\wechat-cli.cmd`
 
 首次安装前请确认：
 
@@ -134,7 +137,7 @@ go build -trimpath -o wechat-cli ./cmd/wx-mcp
 macOS release 包：
 
 ```bash
-WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.0
+WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.1
 ```
 
 Windows release 包由 GitHub Actions 的 `Windows Release Package` workflow 构建。

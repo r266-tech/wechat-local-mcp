@@ -10,6 +10,8 @@ LEGACY_WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
 SOURCE_DIR="${0:A:h}"
 INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-${WX_MCP_INSTALL_DIR:-$HOME/.local/share/wechat-cli}}"
 LEGACY_INSTALL_DIR="$HOME/.local/share/wx-mcp"
+BIN_DIR="${WECHAT_CLI_BIN_DIR:-${WX_MCP_BIN_DIR:-$HOME/.local/bin}}"
+SHIM_PATH="$BIN_DIR/$APP_NAME"
 LOG_DIR="${WECHAT_CLI_LOG_DIR:-$HOME/Library/Logs/wechat-cli}"
 INSTALL_LOG="$LOG_DIR/install.log"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
@@ -83,6 +85,8 @@ Install options:
   --no-mcp                  Do not register MCP (default).
   --mcp-client auto|claude|codex|none
   --install-dir PATH        Default: ~/.local/share/wechat-cli
+  --bin-dir PATH            Directory for the `wechat-cli` command shim.
+                            Default: ~/.local/bin
   --watcher-interval SEC    Default: 300.
   --yes                     Non-interactive approval for side effects.
   --json                    Emit a single JSON result to stdout.
@@ -97,6 +101,7 @@ Install options:
 
 Environment:
   WECHAT_CLI_INSTALL_DIR    Override install directory. WX_MCP_INSTALL_DIR still works.
+  WECHAT_CLI_BIN_DIR        Override CLI command shim directory. WX_MCP_BIN_DIR still works.
   WECHAT_CLI_WCDB_DYLIB     Existing libWCDB.dylib to copy. WX_MCP_WCDB_DYLIB still works.
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
@@ -159,6 +164,8 @@ emit_json() {
   print "  \"next_action\": \"$(json_escape "$NEXT_ACTION")\","
   print "  \"source_dir\": \"$(json_escape "$SOURCE_DIR")\","
   print "  \"install_dir\": \"$(json_escape "$INSTALL_DIR")\","
+  print "  \"bin_dir\": \"$(json_escape "$BIN_DIR")\","
+  print "  \"shim_path\": \"$(json_escape "$SHIM_PATH")\","
   print "  \"mcp_client\": \"$(json_escape "$MCP_CLIENT")\","
   print "  \"mcp_scope\": \"$(json_escape "$MCP_SCOPE")\","
   print "  \"watcher_label\": \"$(json_escape "$WATCHER_LABEL")\","
@@ -187,6 +194,7 @@ print_human_result() {
   fi
   print "  status: $INSTALL_STATUS"
   print "  install_dir: $INSTALL_DIR"
+  print "  command: $SHIM_PATH"
   [[ -n "$BLOCKED_BY" ]] && print "  blocked_by: $BLOCKED_BY"
   [[ -n "$NEXT_ACTION" ]] && print "  next: $NEXT_ACTION"
   if [[ "${#MCP_REGISTERED_CLIENTS[@]}" -gt 0 ]]; then
@@ -206,7 +214,11 @@ print_human_result() {
   fi
   if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
     print
-    print "Next: run $INSTALL_DIR/$APP_NAME sessions to verify end-to-end access."
+    if path_has_bin_dir; then
+      print "Next: run $APP_NAME sessions to verify end-to-end access."
+    else
+      print "Next: run $SHIM_PATH sessions to verify end-to-end access, or add $BIN_DIR to PATH."
+    fi
     print "macOS quiet mode: add $INSTALL_DIR/$APP_NAME and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
   fi
 }
@@ -280,6 +292,18 @@ run_logged_in() {
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+path_has_bin_dir() {
+  local dir
+  for dir in ${(s.:.)PATH}; do
+    [[ "$dir" == "$BIN_DIR" ]] && return 0
+  done
+  return 1
+}
+
+same_file() {
+  [[ -e "$1" && -e "$2" && "$1" -ef "$2" ]]
 }
 
 expand_path() {
@@ -395,6 +419,15 @@ parse_args() {
         ;;
       --install-dir=*)
         INSTALL_DIR="$(expand_path "${1#*=}")"
+        shift
+        ;;
+      --bin-dir)
+        [[ "$#" -ge 2 ]] || die "--bin-dir requires a value" 2
+        BIN_DIR="$(expand_path "$2")"
+        shift 2
+        ;;
+      --bin-dir=*)
+        BIN_DIR="$(expand_path "${1#*=}")"
         shift
         ;;
       --watcher-interval)
@@ -549,6 +582,24 @@ install_components() {
 
   if [[ "$LIB_SOURCE" != "$INSTALL_DIR/libWCDB.dylib" ]]; then
     cp "$LIB_SOURCE" "$INSTALL_DIR/libWCDB.dylib" || die "copy libWCDB.dylib failed" 1
+  fi
+}
+
+install_cli_shim() {
+  SHIM_PATH="$BIN_DIR/$APP_NAME"
+  ACTIONS+=("link CLI command $SHIM_PATH -> $INSTALL_DIR/$APP_NAME")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+
+  mkdir -p "$BIN_DIR"
+  if [[ -e "$SHIM_PATH" && ! -L "$SHIM_PATH" ]] && ! same_file "$SHIM_PATH" "$INSTALL_DIR/$APP_NAME"; then
+    warn "not replacing existing non-symlink command at $SHIM_PATH; run $INSTALL_DIR/$APP_NAME directly or remove that file"
+    return
+  fi
+  ln -sfn "$INSTALL_DIR/$APP_NAME" "$SHIM_PATH" || die "create CLI command shim failed: $SHIM_PATH" 1
+  if ! path_has_bin_dir; then
+    warn "$BIN_DIR is not in PATH; add it to your shell profile or run $SHIM_PATH"
   fi
 }
 
@@ -824,6 +875,12 @@ doctor() {
   [[ -x "$INSTALL_DIR/$APP_NAME" ]] && CHECKS+=("installed_wechat_cli=true") || CHECKS+=("installed_wechat_cli=false")
   [[ -x "$INSTALL_DIR/wxkey" ]] && CHECKS+=("installed_wxkey=true") || CHECKS+=("installed_wxkey=false")
   [[ -f "$INSTALL_DIR/libWCDB.dylib" ]] && CHECKS+=("installed_libWCDB=true") || CHECKS+=("installed_libWCDB=false")
+  [[ -L "$SHIM_PATH" || -x "$SHIM_PATH" ]] && CHECKS+=("shim_exists=true") || CHECKS+=("shim_exists=false")
+  if have_cmd "$APP_NAME"; then
+    CHECKS+=("wechat_cli_on_path=$(command -v "$APP_NAME")")
+  else
+    CHECKS+=("wechat_cli_on_path=false")
+  fi
   have_cmd go && CHECKS+=("go=true") || CHECKS+=("go=false")
   have_cmd claude && CHECKS+=("claude=true") || CHECKS+=("claude=false")
   have_cmd codex && CHECKS+=("codex=true") || CHECKS+=("codex=false")
@@ -892,6 +949,29 @@ remove_watcher() {
   rm -f "$LEGACY_INSTALL_DIR/watcher.sh"
 }
 
+remove_cli_shims() {
+  local path target
+  local -a paths
+  paths=("$SHIM_PATH" "$BIN_DIR/$LEGACY_APP_NAME" "$HOME/.local/bin/$APP_NAME" "$HOME/.local/bin/$LEGACY_APP_NAME")
+  for path in "${(@u)paths[@]}"; do
+    [[ -n "$path" ]] || continue
+    ACTIONS+=("remove CLI command shim $path if managed by wechat-cli")
+    if [[ "$DRY_RUN" -eq 1 || ! -e "$path" ]]; then
+      continue
+    fi
+    if [[ -L "$path" ]]; then
+      target="$(readlink "$path" 2>/dev/null || true)"
+      case "$target" in
+        "$INSTALL_DIR/$APP_NAME"|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"|"$LEGACY_INSTALL_DIR/$APP_NAME"|*/wechat-cli/wechat-cli|*/wx-mcp/wx-mcp)
+          rm -f "$path"
+          ;;
+      esac
+    elif same_file "$path" "$INSTALL_DIR/$APP_NAME"; then
+      rm -f "$path"
+    fi
+  done
+}
+
 clear_state() {
   remove_watcher
   queue_purge_state_actions
@@ -903,6 +983,7 @@ clear_state() {
 
 uninstall() {
   remove_watcher
+  remove_cli_shims
   ACTIONS+=("remove install dir $INSTALL_DIR")
   ACTIONS+=("remove legacy install dir $LEGACY_INSTALL_DIR")
   remove_mcp_entries
@@ -923,6 +1004,8 @@ uninstall() {
 main() {
   parse_args "$@"
   INSTALL_DIR="$(expand_path "$INSTALL_DIR")"
+  BIN_DIR="$(expand_path "$BIN_DIR")"
+  SHIM_PATH="$BIN_DIR/$APP_NAME"
   LOG_DIR="$(expand_path "$LOG_DIR")"
   INSTALL_LOG="$LOG_DIR/install.log"
   PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
@@ -947,6 +1030,7 @@ main() {
     install)
       confirm_or_die
       install_components
+      install_cli_shim
       cleanup_legacy_message_cache
       register_mcp
       run_bootstrap
@@ -959,6 +1043,7 @@ main() {
       confirm_or_die
       update_source
       install_components
+      install_cli_shim
       cleanup_legacy_message_cache
       register_mcp
       run_bootstrap

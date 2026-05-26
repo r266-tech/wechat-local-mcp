@@ -9,7 +9,7 @@ import (
 const (
 	appName       = "wechat-cli"
 	legacyAppName = "wx-mcp"
-	appVersion    = "1.6.0"
+	appVersion    = "1.6.1"
 
 	stateDirName       = ".wechat-cli"
 	legacyStateDirName = ".wx-mcp"

@@ -20,6 +20,9 @@ Runtime:
 - Binary: `wechat-cli` / `wechat-cli.exe`
 - macOS install dir: `~/.local/share/wechat-cli`
 - Windows install dir: `%LOCALAPPDATA%\wechat-cli`
+- macOS command shim: `~/.local/bin/wechat-cli`
+- Windows command shim: `%LOCALAPPDATA%\Microsoft\WindowsApps\wechat-cli.cmd`
+  when available, otherwise `%USERPROFILE%\.local\bin\wechat-cli.cmd`
 - State/cache dir: `~/.wechat-cli`
 - Key config remains wxkey-compatible at `~/.config/wxcli/config.json`
 - Preferred env prefix: `WECHAT_CLI_*`; legacy `WX_MCP_*` aliases still work

@@ -13,7 +13,8 @@ param(
   [switch]$Mcp,
   [switch]$NoMcp,
   [string]$McpClient = "none",
-  [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR })
+  [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR }),
+  [string]$BinDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_BIN_DIR)) { $env:WECHAT_CLI_BIN_DIR } else { $env:WX_MCP_BIN_DIR })
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,16 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
   $InstallDir = Join-Path $local $AppName
 }
 $LegacyInstallDir = Join-Path $local "wx-mcp"
+if ([string]::IsNullOrWhiteSpace($BinDir)) {
+  $windowsApps = Join-Path $local "Microsoft\WindowsApps"
+  if (Test-Path $windowsApps) {
+    $BinDir = $windowsApps
+  } else {
+    $BinDir = Join-Path $HOME ".local\bin"
+  }
+}
+$ShimPath = Join-Path $BinDir "$AppName.cmd"
+$LegacyShimPath = Join-Path $BinDir "$LegacyAppName.cmd"
 
 $actions = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
@@ -65,6 +76,7 @@ function Write-HumanResult($Out) {
   }
   Write-Host "  status: $($Out.status)"
   Write-Host "  install_dir: $($Out.install_dir)"
+  Write-Host "  command: $($Out.command)"
   if (-not [string]::IsNullOrWhiteSpace($Out.blocked_by)) {
     Write-Host "  blocked_by: $($Out.blocked_by)"
   }
@@ -93,8 +105,7 @@ function Write-HumanResult($Out) {
   }
   if ($Out.errors.Count -eq 0 -and -not $DryRun -and $Out.mode -in @("install", "update")) {
     Write-Host ""
-    $exe = Join-Path $Out.install_dir "$AppName.exe"
-    Write-Host "Next: run $exe sessions to verify end-to-end access."
+    Write-Host "Next: run $AppName sessions to verify end-to-end access."
   }
 }
 function Finish {
@@ -107,6 +118,8 @@ function Finish {
     blocked_by = $script:blockedBy
     next_action = $script:nextAction
     install_dir = $InstallDir
+    bin_dir = $BinDir
+    command = $ShimPath
     log = $log
     dry_run = [bool]$DryRun
     purge_state = [bool]$script:purgeState
@@ -332,6 +345,45 @@ function Install-Components {
   Copy-InstallDocs
 }
 
+function Path-ContainsBinDir {
+  $pathValue = [Environment]::GetEnvironmentVariable("Path", "Process")
+  if ([string]::IsNullOrWhiteSpace($pathValue)) { return $false }
+  foreach ($entry in $pathValue -split ";") {
+    if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+    try {
+      if ([IO.Path]::GetFullPath($entry.TrimEnd("\")).TrimEnd("\") -ieq [IO.Path]::GetFullPath($BinDir).TrimEnd("\")) {
+        return $true
+      }
+    } catch {
+      if ($entry.TrimEnd("\") -ieq $BinDir.TrimEnd("\")) { return $true }
+    }
+  }
+  return $false
+}
+
+function Install-CliShim {
+  Add-Action "create CLI command shim $ShimPath -> $InstallDir\$AppName.exe"
+  if ($DryRun) { return }
+  New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+  if (Test-Path $ShimPath) {
+    $existing = Get-Item -LiteralPath $ShimPath
+    $content = ""
+    if (-not $existing.PSIsContainer) {
+      $content = Get-Content -LiteralPath $ShimPath -Raw -ErrorAction SilentlyContinue
+    }
+    if ($content -notmatch [regex]::Escape($InstallDir) -and $content -notmatch "wechat-cli\\wechat-cli\.exe") {
+      Add-Warning "not replacing existing command at $ShimPath; run $InstallDir\$AppName.exe directly or remove that file"
+      return
+    }
+  }
+  $exe = Join-Path $InstallDir "$AppName.exe"
+  $cmd = "@echo off`r`n`"$exe`" %*`r`n"
+  Set-Content -LiteralPath $ShimPath -Value $cmd -Encoding ASCII
+  if (-not (Path-ContainsBinDir)) {
+    Add-Warning "$BinDir is not in PATH for this process; open a new shell or run $ShimPath"
+  }
+}
+
 function Run-CacheRefresh {
   if (-not ($All -or $Refresh)) { return }
   $exe = Join-Path $InstallDir "$AppName.exe"
@@ -407,6 +459,8 @@ function Clear-State {
 }
 
 function Uninstall-WxMcp {
+  Add-Action "remove CLI command shim $ShimPath if managed by wechat-cli"
+  Add-Action "remove legacy CLI command shim $LegacyShimPath if managed by wechat-cli"
   Add-Action "remove install directory $InstallDir"
   Add-Action "remove legacy install directory $LegacyInstallDir"
   Remove-McpEntries
@@ -415,6 +469,15 @@ function Uninstall-WxMcp {
   }
   if (-not $DryRun -and (Test-Path $InstallDir)) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
+  }
+  if (-not $DryRun) {
+    foreach ($path in @($ShimPath, $LegacyShimPath)) {
+      if (-not (Test-Path $path)) { continue }
+      $content = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
+      if ($content -match [regex]::Escape($InstallDir) -or $content -match [regex]::Escape($LegacyInstallDir) -or $content -match "wechat-cli\\wechat-cli\.exe" -or $content -match "wx-mcp\\wx-mcp\.exe") {
+        Remove-Item -LiteralPath $path -Force
+      }
+    }
   }
   if (-not $DryRun -and (Test-Path $LegacyInstallDir)) {
     Remove-Item -LiteralPath $LegacyInstallDir -Recurse -Force
@@ -430,6 +493,8 @@ function Run-Doctor {
   $checks.Add("install_dir_exists=$(Test-Path $InstallDir)") | Out-Null
   $checks.Add("installed_wechat_cli=$(Test-Path (Join-Path $InstallDir "$AppName.exe"))") | Out-Null
   $checks.Add("installed_libWCDB=$(Test-Path (Join-Path $InstallDir 'libWCDB.dll'))") | Out-Null
+  $checks.Add("shim_exists=$(Test-Path $ShimPath)") | Out-Null
+  $checks.Add("wechat_cli_on_path=$(Have-Command $AppName)") | Out-Null
   $checks.Add("go=$(Have-Command 'go')") | Out-Null
   $checks.Add("codex=$(Have-Command 'codex')") | Out-Null
   $checks.Add("claude=$(Have-Command 'claude')") | Out-Null
@@ -485,6 +550,7 @@ try {
   }
 
   Install-Components
+  Install-CliShim
   Clear-LegacyMessageCache
   Register-Mcp
   Run-CacheRefresh

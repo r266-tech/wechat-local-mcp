@@ -71,6 +71,9 @@ Release zip contents:
   must be present beside `wechat-cli.exe` on Windows.
 - Install dir defaults: `~/.local/share/wechat-cli` on macOS and
   `%LOCALAPPDATA%\wechat-cli` on Windows.
+- Command shim defaults to `~/.local/bin/wechat-cli` on macOS. On Windows it
+  defaults to `%LOCALAPPDATA%\Microsoft\WindowsApps\wechat-cli.cmd` when that
+  directory exists, otherwise `%USERPROFILE%\.local\bin\wechat-cli.cmd`.
 - State/cache dir defaults to `~/.wechat-cli`.
 - Key config remains wxkey-compatible at `~/.config/wxcli/config.json`.
 - Preferred env prefix is `WECHAT_CLI_*`; legacy `WX_MCP_*` aliases still work.
@@ -112,11 +115,11 @@ MCP registration, or watcher setup unless flags are explicitly added.
 Verify after install:
 
 ```bash
-~/.local/share/wechat-cli/wechat-cli sessions
+wechat-cli sessions
 ```
 
 ```powershell
-& "$env:LOCALAPPDATA\wechat-cli\wechat-cli.exe" sessions
+wechat-cli sessions
 ```
 
 ## Reset / Uninstall
