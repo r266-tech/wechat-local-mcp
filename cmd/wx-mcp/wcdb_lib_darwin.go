@@ -27,5 +27,5 @@ func wcdbLibraryCandidates() []string {
 }
 
 func wcdbLibraryMissingMessage() string {
-	return "libWCDB.dylib not found. Put it beside wx-mcp, under ./lib, under ~/.config/wxcli/lib, or set WX_MCP_WCDB_LIB / WX_MCP_WCDB_DYLIB"
+	return "libWCDB.dylib not found. Put it beside wechat-cli, under ./lib, under ~/.config/wxcli/lib, or set WECHAT_CLI_WCDB_LIB / WECHAT_CLI_WCDB_DYLIB"
 }

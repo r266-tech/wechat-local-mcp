@@ -1,22 +1,22 @@
 {
-  "name": "wx-mcp",
-  "version": "1.5.5",
+  "name": "wechat-cli",
+  "version": "1.6.0",
   "description": "CLI-first local WeChat 4.x data reader for macOS and Windows, with an optional legacy MCP stdio adapter.",
   "homepage": "https://github.com/r266-tech/wechat-local-mcp",
   "license": "MIT",
   "platforms": ["darwin-arm64", "windows-amd64"],
   "transport": {
     "type": "stdio",
-    "command": "./wx-mcp",
+    "command": "./wechat-cli",
     "args": ["serve-mcp"],
-    "windowsCommand": ".\\wx-mcp.exe",
+    "windowsCommand": ".\\wechat-cli.exe",
     "windowsArgs": ["serve-mcp"]
   },
   "installer": {
     "oneLineMacOS": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh",
-    "oneLineMacOSJson": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | env WX_MCP_INSTALL_JSON=1 zsh",
+    "oneLineMacOSJson": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh",
     "oneLineWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex\"",
-    "oneLineWindowsJson": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Environment]::SetEnvironmentVariable('WX_MCP_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex\"",
+    "oneLineWindowsJson": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex\"",
     "command": "./install.sh --all --yes --json",
     "doctor": "./install.sh --doctor --json",
     "update": "./install.sh --update --yes --json",
@@ -28,13 +28,13 @@
   "runtime": {
     "requires": [
       "WeChat 4.x local data directory for the current OS user",
-      "macOS release zip includes wx-mcp, wxkey, libWCDB.dylib, install.sh, README.md, llms.txt, AGENTS.md, mcp-server.json, and scripts/install-release.sh",
-      "Windows release zip includes wx-mcp.exe, libWCDB.dll, install.ps1, README.md, llms.txt, AGENTS.md, mcp-server.json, and scripts/install-release.ps1",
+      "macOS release zip includes wechat-cli, wxkey, libWCDB.dylib, install.sh, README.md, llms.txt, AGENTS.md, mcp-server.json, and scripts/install-release.sh",
+      "Windows release zip includes wechat-cli.exe, libWCDB.dll, install.ps1, README.md, llms.txt, AGENTS.md, mcp-server.json, and scripts/install-release.ps1",
       "schema-2 WeChat DB key map is created by macOS wxkey bootstrap or Windows process scan",
       "macOS key setup uses wxkey bootstrap; Windows key setup scans a running Weixin.exe/WeChat.exe process and stores verified schema-2 keys"
     ],
     "keyBootstrap": "./wxkey bootstrap",
-    "windowsKeySetup": ".\\wx-mcp.exe cache refresh --force"
+    "windowsKeySetup": ".\\wechat-cli.exe cache refresh --force"
   },
   "tools": {
     "primary": ["sessions", "resolve_chat", "chat_timeline", "messages", "media_resources", "search"],

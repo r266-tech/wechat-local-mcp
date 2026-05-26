@@ -29,5 +29,5 @@ func wcdbLibraryCandidates() []string {
 }
 
 func wcdbLibraryMissingMessage() string {
-	return "WCDB DLL not found. Put libWCDB.dll or WCDB.dll beside wx-mcp.exe, under .\\lib, under %USERPROFILE%\\.config\\wxcli\\lib, or set WX_MCP_WCDB_LIB"
+	return "WCDB DLL not found. Put libWCDB.dll or WCDB.dll beside wechat-cli.exe, under .\\lib, under %USERPROFILE%\\.config\\wxcli\\lib, or set WECHAT_CLI_WCDB_LIB"
 }

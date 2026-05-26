@@ -140,7 +140,7 @@ func OpenWithEncKeyWritable(dbPath, encKeyHex, saltHex string) (*DB, error) {
 
 // OpenWithKeyMap opens dbPath after reading the SQLCipher salt from the file
 // header (first 16 bytes) and looking up the matching enc_key in keys
-// (salt-hex -> enc_key-hex). wx-mcp intentionally supports only this schema-2
+// (salt-hex -> enc_key-hex). wechat-cli intentionally supports only this schema-2
 // raw-key path; missing salts must be fixed by refreshing wxkey's key map.
 func OpenWithKeyMap(dbPath string, keys map[string]string) (*DB, error) {
 	salt, err := readDBSalt(dbPath)

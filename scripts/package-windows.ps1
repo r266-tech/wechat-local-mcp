@@ -1,6 +1,6 @@
 param(
   [string]$Version = "1.0.0",
-  [string]$WcdbLib = $env:WX_MCP_WCDB_LIB
+  [string]$WcdbLib = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_LIB)) { $env:WECHAT_CLI_WCDB_LIB } else { $env:WX_MCP_WCDB_LIB })
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,19 +81,19 @@ if ([string]::IsNullOrWhiteSpace($WcdbLib)) {
   }
 }
 if ([string]::IsNullOrWhiteSpace($WcdbLib) -or -not (Test-Path $WcdbLib)) {
-  throw "WCDB DLL missing. Set WX_MCP_WCDB_LIB or place libWCDB.dll/WCDB.dll under .\lib."
+  throw "WCDB DLL missing. Set WECHAT_CLI_WCDB_LIB or place libWCDB.dll/WCDB.dll under .\lib."
 }
 Assert-WcdbDllExports $WcdbLib
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-  throw "Go is required to build wx-mcp.exe"
+  throw "Go is required to build wechat-cli.exe"
 }
 
 $distRoot = Join-Path $SourceDir "dist"
-$dist = Join-Path $distRoot "wx-mcp-v$Version-windows-amd64"
+$dist = Join-Path $distRoot "wechat-cli-v$Version-windows-amd64"
 if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-& go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wx-mcp.exe") ./cmd/wx-mcp
+& go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wx-mcp
 if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 
 Copy-Item -LiteralPath $WcdbLib -Destination (Join-Path $dist "libWCDB.dll") -Force
@@ -105,8 +105,8 @@ if (Test-Path (Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md")) {
   Copy-Item -LiteralPath (Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md") -Destination (Join-Path $dist "docs\WINDOWS_USER_GUIDE.md") -Force
 }
 
-$zip = Join-Path $distRoot "wx-mcp-v$Version-windows-amd64.zip"
-$latest = Join-Path $distRoot "wx-mcp-latest-windows-amd64.zip"
+$zip = Join-Path $distRoot "wechat-cli-v$Version-windows-amd64.zip"
+$latest = Join-Path $distRoot "wechat-cli-latest-windows-amd64.zip"
 if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
 if (Test-Path $latest) { Remove-Item -LiteralPath $latest -Force }
 Compress-Archive -Path $dist -DestinationPath $zip -Force

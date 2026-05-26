@@ -1,5 +1,7 @@
 /wx-mcp
 /wx-mcp.exe
+/wechat-cli
+/wechat-cli.exe
 /dist/
 /lib/*.dylib
 /lib/*.dll

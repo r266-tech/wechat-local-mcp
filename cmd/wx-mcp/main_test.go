@@ -788,11 +788,11 @@ func main() {
 }
 
 func TestSplitWindowsCommandLine(t *testing.T) {
-	got, ok := splitWindowsCommandLine(`"C:\Program Files\wx-mcp\asr.exe" --input "{audio}"`)
+	got, ok := splitWindowsCommandLine(`"C:\Program Files\wechat-cli\asr.exe" --input "{audio}"`)
 	if !ok {
 		t.Fatal("splitWindowsCommandLine returned !ok")
 	}
-	want := []string{`C:\Program Files\wx-mcp\asr.exe`, "--input", "{audio}"}
+	want := []string{`C:\Program Files\wechat-cli\asr.exe`, "--input", "{audio}"}
 	if len(got) != len(want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
@@ -1678,7 +1678,7 @@ func TestDecodeLocalImageForAgentWritesDecodedPath(t *testing.T) {
 	if _, err := os.Stat(decodedPaths[0]); err != nil {
 		t.Fatalf("decoded path is not readable: %v", err)
 	}
-	if !strings.HasPrefix(decodedPaths[0], filepath.Join(home, ".wx-mcp", "media-cache", "wxid_test")) {
+	if !strings.HasPrefix(decodedPaths[0], filepath.Join(home, ".wechat-cli", "media-cache", "wxid_test")) {
 		t.Fatalf("decoded path %q not under media cache", decodedPaths[0])
 	}
 	details, ok := res["local_path_details"].([]map[string]any)
@@ -2132,7 +2132,7 @@ func TestAcquireCacheRefreshLock(t *testing.T) {
 	if !acquired {
 		t.Fatalf("first lock acquire should succeed")
 	}
-	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".wx-mcp", "cache-refresh.lock")); err != nil {
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".wechat-cli", "cache-refresh.lock")); err != nil {
 		t.Fatalf("lock dir missing at %s: %v", lockPath, err)
 	}
 

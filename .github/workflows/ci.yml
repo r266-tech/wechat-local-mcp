@@ -18,12 +18,12 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
-      - name: Build wx-mcp (macOS)
+      - name: Build wechat-cli (macOS)
         if: runner.os == 'macOS'
-        run: go build -trimpath -o wx-mcp ./cmd/wx-mcp
-      - name: Build wx-mcp (Windows)
+        run: go build -trimpath -o wechat-cli ./cmd/wx-mcp
+      - name: Build wechat-cli (Windows)
         if: runner.os == 'Windows'
-        run: go build -trimpath -o wx-mcp.exe ./cmd/wx-mcp
+        run: go build -trimpath -o wechat-cli.exe ./cmd/wx-mcp
       - name: Parse PowerShell installers
         if: runner.os == 'Windows'
         shell: powershell

@@ -13,7 +13,7 @@ func cacheLogDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".wx-mcp", "logs"), nil
+	return filepath.Join(home, stateDirName, "logs"), nil
 }
 
 func configureBackgroundCommand(cmd *exec.Cmd) {

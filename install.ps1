@@ -13,19 +13,24 @@ param(
   [switch]$Mcp,
   [switch]$NoMcp,
   [string]$McpClient = "none",
-  [string]$InstallDir = $env:WX_MCP_INSTALL_DIR
+  [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR })
 )
 
 $ErrorActionPreference = "Stop"
 
+$AppName = "wechat-cli"
+$LegacyAppName = "wx-mcp"
+$McpName = "wechat-cli"
+$LegacyMcpName = "wx-mcp"
 $SourceDir = $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($InstallDir)) {
-  $local = $env:LOCALAPPDATA
-  if ([string]::IsNullOrWhiteSpace($local)) {
-    $local = Join-Path $HOME "AppData\Local"
-  }
-  $InstallDir = Join-Path $local "wx-mcp"
+$local = $env:LOCALAPPDATA
+if ([string]::IsNullOrWhiteSpace($local)) {
+  $local = Join-Path $HOME "AppData\Local"
 }
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+  $InstallDir = Join-Path $local $AppName
+}
+$LegacyInstallDir = Join-Path $local "wx-mcp"
 
 $actions = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
@@ -54,9 +59,9 @@ function Write-Log([string]$text) {
 function Write-HumanResult($Out) {
   Write-Host ""
   if ($Out.errors.Count -gt 0) {
-    Write-Host "wx-mcp $($Out.mode) failed"
+    Write-Host "$AppName $($Out.mode) failed"
   } else {
-    Write-Host "wx-mcp $($Out.mode) complete"
+    Write-Host "$AppName $($Out.mode) complete"
   }
   Write-Host "  status: $($Out.status)"
   Write-Host "  install_dir: $($Out.install_dir)"
@@ -88,14 +93,14 @@ function Write-HumanResult($Out) {
   }
   if ($Out.errors.Count -eq 0 -and -not $DryRun -and $Out.mode -in @("install", "update")) {
     Write-Host ""
-    $exe = Join-Path $Out.install_dir "wx-mcp.exe"
+    $exe = Join-Path $Out.install_dir "$AppName.exe"
     Write-Host "Next: run $exe sessions to verify end-to-end access."
   }
 }
 function Finish {
   param([int]$Code = 0)
   $out = [ordered]@{
-    name = "wx-mcp"
+    name = $AppName
     platform = "windows"
     mode = $script:mode
     status = $script:status
@@ -123,20 +128,27 @@ function Finish {
 }
 
 function Resolve-WxMcp {
-  $bin = Join-Path $SourceDir "wx-mcp.exe"
+  $bin = Join-Path $SourceDir "$AppName.exe"
   if (Test-Path $bin) {
-    Add-Action "copy wx-mcp.exe from source directory"
+    Add-Action "copy $AppName.exe from source directory"
     return @{ Mode = "copy"; Path = $bin }
   }
+  $legacyBin = Join-Path $SourceDir "$LegacyAppName.exe"
+  if (Test-Path $legacyBin) {
+    Add-Action "copy legacy $LegacyAppName.exe from source directory"
+    return @{ Mode = "copy"; Path = $legacyBin }
+  }
   if ((Test-Path (Join-Path $SourceDir "cmd\wx-mcp\main.go")) -and (Have-Command "go")) {
-    Add-Action "build wx-mcp.exe from source"
+    Add-Action "build $AppName.exe from source"
     return @{ Mode = "build"; Path = $SourceDir }
   }
-  throw "wx-mcp.exe not found and Go is not available to build it"
+  throw "$AppName.exe not found and Go is not available to build it"
 }
 
 function Resolve-WcdbDll {
   $candidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_LIB)) { $candidates += $env:WECHAT_CLI_WCDB_LIB }
+  if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_DYLIB)) { $candidates += $env:WECHAT_CLI_WCDB_DYLIB }
   if (-not [string]::IsNullOrWhiteSpace($env:WX_MCP_WCDB_LIB)) { $candidates += $env:WX_MCP_WCDB_LIB }
   if (-not [string]::IsNullOrWhiteSpace($env:WX_MCP_WCDB_DYLIB)) { $candidates += $env:WX_MCP_WCDB_DYLIB }
   $candidates += (Join-Path $SourceDir "libWCDB.dll")
@@ -151,7 +163,7 @@ function Resolve-WcdbDll {
       return $cand
     }
   }
-  throw "WCDB DLL not found; put libWCDB.dll or WCDB.dll beside install.ps1, under .\lib, under ~/.config/wxcli/lib, or set WX_MCP_WCDB_LIB"
+  throw "WCDB DLL not found; put libWCDB.dll or WCDB.dll beside install.ps1, under .\lib, under ~/.config/wxcli/lib, or set WECHAT_CLI_WCDB_LIB"
 }
 
 function Confirm-Or-Die {
@@ -160,7 +172,7 @@ function Confirm-Or-Die {
   if ($Json) {
     throw "non-interactive install/update/uninstall requires -Yes"
   }
-  $answer = Read-Host "Proceed with wx-mcp $mode into $InstallDir? [y/N]"
+  $answer = Read-Host "Proceed with $AppName $mode into $InstallDir? [y/N]"
   if ($answer -notin @("y", "Y", "yes", "YES")) {
     $script:status = "cancelled"
     Finish 1
@@ -193,16 +205,17 @@ function Copy-InstallDocs {
 
 function Register-Mcp {
   if (-not $script:registerMcp -or $NoMcp -or $McpClient -eq "none") { return }
-  $exe = Join-Path $InstallDir "wx-mcp.exe"
+  $exe = Join-Path $InstallDir "$AppName.exe"
   $found = $false
   if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
-    Add-Action "register Codex MCP server wx-mcp at $exe serve-mcp"
+    Add-Action "register Codex MCP server $McpName at $exe serve-mcp"
     if ($DryRun) {
       $found = $true
     } else {
     try {
-      & codex mcp remove wx-mcp *> $null
-      & codex mcp add wx-mcp -- $exe serve-mcp *> $null
+      & codex mcp remove $McpName *> $null
+      & codex mcp remove $LegacyMcpName *> $null
+      & codex mcp add $McpName -- $exe serve-mcp *> $null
       $registered.Add("codex") | Out-Null
       $found = $true
     } catch {
@@ -211,13 +224,14 @@ function Register-Mcp {
     }
   }
   if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
-    Add-Action "register Claude MCP server wx-mcp at $exe serve-mcp"
+    Add-Action "register Claude MCP server $McpName at $exe serve-mcp"
     if ($DryRun) {
       $found = $true
     } else {
     try {
-      & claude mcp remove -s user wx-mcp *> $null
-      & claude mcp add -s user wx-mcp $exe serve-mcp *> $null
+      & claude mcp remove -s user $McpName *> $null
+      & claude mcp remove -s user $LegacyMcpName *> $null
+      & claude mcp add -s user $McpName $exe serve-mcp *> $null
       $registered.Add("claude") | Out-Null
       $found = $true
     } catch {
@@ -233,20 +247,22 @@ function Register-Mcp {
 function Remove-McpEntries {
   if ($NoMcp -or $McpClient -eq "none") { return }
   if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
-    Add-Action "remove Codex MCP server wx-mcp"
+    Add-Action "remove Codex MCP server $McpName and legacy $LegacyMcpName"
     if (-not $DryRun) {
       try {
-        & codex mcp remove wx-mcp *> $null
+        & codex mcp remove $McpName *> $null
+        & codex mcp remove $LegacyMcpName *> $null
       } catch {
         Add-Warning "Codex MCP removal failed: $($_.Exception.Message)"
       }
     }
   }
   if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
-    Add-Action "remove Claude MCP server wx-mcp"
+    Add-Action "remove Claude MCP server $McpName and legacy $LegacyMcpName"
     if (-not $DryRun) {
       try {
-        & claude mcp remove -s user wx-mcp *> $null
+        & claude mcp remove -s user $McpName *> $null
+        & claude mcp remove -s user $LegacyMcpName *> $null
       } catch {
         Add-Warning "Claude MCP removal failed: $($_.Exception.Message)"
       }
@@ -284,7 +300,7 @@ function Update-Source {
 function Install-Components {
   $components = Resolve-Components
   if ($DryRun) {
-    Add-Action "would install wx-mcp.exe into $InstallDir"
+    Add-Action "would install $AppName.exe into $InstallDir"
     Add-Action "would copy WCDB DLL into $InstallDir"
     Add-Action "would copy installer docs and manifest"
     return
@@ -297,14 +313,14 @@ function Install-Components {
   if ($wx.Mode -eq "build") {
     Push-Location $wx.Path
     try {
-      Write-Log "go build -o $InstallDir\wx-mcp.exe ./cmd/wx-mcp"
-      & go build -o (Join-Path $InstallDir "wx-mcp.exe") ./cmd/wx-mcp 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+      Write-Log "go build -o $InstallDir\$AppName.exe ./cmd/wx-mcp"
+      & go build -o (Join-Path $InstallDir "$AppName.exe") ./cmd/wx-mcp 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
       if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
     } finally {
       Pop-Location
     }
   } else {
-    Copy-Item -LiteralPath $wx.Path -Destination (Join-Path $InstallDir "wx-mcp.exe") -Force
+    Copy-Item -LiteralPath $wx.Path -Destination (Join-Path $InstallDir "$AppName.exe") -Force
   }
 
   $dll = $components.Dll
@@ -318,14 +334,14 @@ function Install-Components {
 
 function Run-CacheRefresh {
   if (-not ($All -or $Refresh)) { return }
-  $exe = Join-Path $InstallDir "wx-mcp.exe"
+  $exe = Join-Path $InstallDir "$AppName.exe"
   if ($BackgroundRefresh) {
     Add-Action "start metadata cache refresh in background"
     if ($DryRun) { return }
     & $exe cache refresh --background 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "metadata cache refresh background start failed with exit code $LASTEXITCODE" }
     $script:status = "warming_cache"
-    $script:nextAction = "wx-mcp is installed; metadata cache refresh is warming in the background."
+    $script:nextAction = "$AppName is installed; metadata cache refresh is warming in the background."
     $script:refreshRan = $true
     return
   }
@@ -335,25 +351,26 @@ function Run-CacheRefresh {
   & $exe cache refresh --force 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "metadata cache refresh failed with exit code $LASTEXITCODE" }
   $script:status = "ready"
-  $script:nextAction = "wx-mcp is installed and the metadata cache refresh completed."
+  $script:nextAction = "$AppName is installed and the metadata cache refresh completed."
   $script:refreshRan = $true
 }
 
 function Clear-LegacyMessageCache {
-  $cacheRoot = Join-Path $HOME ".wx-mcp\cache"
-  if (-not (Test-Path $cacheRoot)) { return }
-  Add-Action "drop existing cache indexes and non-metadata raw snapshots under $cacheRoot"
-  if ($DryRun) { return }
-  Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-    foreach ($name in @("index.sqlite", "index.sqlite-wal", "index.sqlite-shm")) {
-      $p = Join-Path $_.FullName $name
-      if (Test-Path $p) { Remove-Item -LiteralPath $p -Force }
-    }
-    $raw = Join-Path $_.FullName "raw"
-    if (Test-Path $raw) {
-      Get-ChildItem -LiteralPath $raw -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.Name -notin @("contact", "session")) {
-          Remove-Item -LiteralPath $_.FullName -Recurse -Force
+  foreach ($cacheRoot in @((Join-Path $HOME ".wechat-cli\cache"), (Join-Path $HOME ".wx-mcp\cache"))) {
+    if (-not (Test-Path $cacheRoot)) { continue }
+    Add-Action "drop existing cache indexes and non-metadata raw snapshots under $cacheRoot"
+    if ($DryRun) { continue }
+    Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+      foreach ($name in @("index.sqlite", "index.sqlite-wal", "index.sqlite-shm")) {
+        $p = Join-Path $_.FullName $name
+        if (Test-Path $p) { Remove-Item -LiteralPath $p -Force }
+      }
+      $raw = Join-Path $_.FullName "raw"
+      if (Test-Path $raw) {
+        Get-ChildItem -LiteralPath $raw -Force -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.Name -notin @("contact", "session")) {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force
+          }
         }
       }
     }
@@ -362,13 +379,15 @@ function Clear-LegacyMessageCache {
 
 function Add-PurgeStateActions {
   Add-Action ("remove wxkey config file {0}" -f (Join-Path $HOME ".config\wxcli\config.json"))
-  Add-Action ("remove wx-mcp state dir {0}" -f (Join-Path $HOME ".wx-mcp"))
-  Add-Action "remove wx-mcp install logs $logDir"
+  Add-Action ("remove wechat-cli state dir {0}" -f (Join-Path $HOME ".wechat-cli"))
+  Add-Action ("remove legacy wx-mcp state dir {0}" -f (Join-Path $HOME ".wx-mcp"))
+  Add-Action "remove wechat-cli install logs $logDir"
 }
 
 function Invoke-PurgeState {
   $paths = @(
     (Join-Path $HOME ".config\wxcli\config.json"),
+    (Join-Path $HOME ".wechat-cli"),
     (Join-Path $HOME ".wx-mcp"),
     $logDir
   )
@@ -389,12 +408,16 @@ function Clear-State {
 
 function Uninstall-WxMcp {
   Add-Action "remove install directory $InstallDir"
+  Add-Action "remove legacy install directory $LegacyInstallDir"
   Remove-McpEntries
   if ($script:purgeState) {
     Add-PurgeStateActions
   }
   if (-not $DryRun -and (Test-Path $InstallDir)) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
+  }
+  if (-not $DryRun -and (Test-Path $LegacyInstallDir)) {
+    Remove-Item -LiteralPath $LegacyInstallDir -Recurse -Force
   }
   if (-not $DryRun -and $script:purgeState) {
     Invoke-PurgeState
@@ -405,7 +428,7 @@ function Uninstall-WxMcp {
 function Run-Doctor {
   $checks.Add("os=Windows") | Out-Null
   $checks.Add("install_dir_exists=$(Test-Path $InstallDir)") | Out-Null
-  $checks.Add("installed_wx_mcp=$(Test-Path (Join-Path $InstallDir 'wx-mcp.exe'))") | Out-Null
+  $checks.Add("installed_wechat_cli=$(Test-Path (Join-Path $InstallDir "$AppName.exe"))") | Out-Null
   $checks.Add("installed_libWCDB=$(Test-Path (Join-Path $InstallDir 'libWCDB.dll'))") | Out-Null
   $checks.Add("go=$(Have-Command 'go')") | Out-Null
   $checks.Add("codex=$(Have-Command 'codex')") | Out-Null
@@ -483,10 +506,10 @@ try {
     $nextAction = "Start Windows WeChat, finish login, open one chat, then rerun install.ps1 -All -Yes -Json."
   } elseif ($message -match "no usable Windows WeChat raw keys") {
     $blockedBy = "key_scan_failed"
-    $nextAction = "Verify WX_MCP_DB_ROOT belongs to the logged-in Windows WeChat account; if multiple WeChat processes exist, set WX_MCP_WECHAT_PID and rerun install.ps1 -All -Yes -Json."
-  } elseif ($message -match "no account directory with db_storage|WX_MCP_DB_ROOT") {
+    $nextAction = "Verify WECHAT_CLI_DB_ROOT belongs to the logged-in Windows WeChat account; if multiple WeChat processes exist, set WECHAT_CLI_WECHAT_PID and rerun install.ps1 -All -Yes -Json."
+  } elseif ($message -match "no account directory with db_storage|WECHAT_CLI_DB_ROOT|WX_MCP_DB_ROOT") {
     $blockedBy = "db_root_not_found"
-    $nextAction = "Set WX_MCP_DB_ROOT to the WeChat account directory that directly contains db_storage, then rerun install.ps1 -All -Yes -Json."
+    $nextAction = "Set WECHAT_CLI_DB_ROOT to the WeChat account directory that directly contains db_storage, then rerun install.ps1 -All -Yes -Json."
   } elseif ($message -match "WCDB DLL") {
     $blockedBy = "wcdb_dll_missing"
     $nextAction = "Use the Windows release zip with libWCDB.dll included, or put libWCDB.dll beside install.ps1, then rerun install.ps1 -All -Yes -Json."

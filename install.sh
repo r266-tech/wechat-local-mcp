@@ -1,15 +1,20 @@
 #!/usr/bin/env zsh
 set -u
 
-APP_NAME="wx-mcp"
-MCP_NAME="wx-mcp"
-WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
+APP_NAME="wechat-cli"
+LEGACY_APP_NAME="wx-mcp"
+MCP_NAME="wechat-cli"
+LEGACY_MCP_NAME="wx-mcp"
+WATCHER_LABEL="com.r266.wechat-cli-cache-watcher"
+LEGACY_WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
 SOURCE_DIR="${0:A:h}"
-INSTALL_DIR="${WX_MCP_INSTALL_DIR:-$HOME/.local/share/wx-mcp}"
-LOG_DIR="$HOME/Library/Logs/wx-mcp"
+INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-${WX_MCP_INSTALL_DIR:-$HOME/.local/share/wechat-cli}}"
+LEGACY_INSTALL_DIR="$HOME/.local/share/wx-mcp"
+LOG_DIR="${WECHAT_CLI_LOG_DIR:-$HOME/Library/Logs/wechat-cli}"
 INSTALL_LOG="$LOG_DIR/install.log"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
+LEGACY_PLIST_PATH="$LAUNCH_AGENTS_DIR/$LEGACY_WATCHER_LABEL.plist"
 WATCHER_INTERVAL=300
 MCP_CLIENT="none"
 MCP_SCOPE="user"
@@ -66,33 +71,33 @@ Install options:
                             Does not bootstrap, refresh metadata cache, register MCP,
                             or touch watcher unless those flags are added.
   --bootstrap               Run wxkey bootstrap after installing binaries.
-  --refresh                 Start wx-mcp metadata cache refresh after installing binaries.
+  --refresh                 Start wechat-cli metadata cache refresh after installing binaries.
                             Defaults to background warmup; set
-                            WX_MCP_INSTALL_SYNC_REFRESH=1 for foreground wait.
+                            WECHAT_CLI_INSTALL_SYNC_REFRESH=1 for foreground wait.
   --watcher                 Install launchd cache watcher (5-min periodic
                             metadata cache refresh). WARNING: on macOS 15+ each refresh
-                            triggers a "wx-mcp wants to access another app's
-                            data" TCC prompt unless wx-mcp has Full Disk Access
+                            triggers a "wechat-cli wants to access another app's
+                            data" TCC prompt unless wechat-cli has Full Disk Access
                             granted in System Settings → Privacy & Security.
   --mcp                     Register the optional legacy MCP adapter.
   --no-mcp                  Do not register MCP (default).
   --mcp-client auto|claude|codex|none
-  --install-dir PATH        Default: ~/.local/share/wx-mcp
+  --install-dir PATH        Default: ~/.local/share/wechat-cli
   --watcher-interval SEC    Default: 300.
   --yes                     Non-interactive approval for side effects.
   --json                    Emit a single JSON result to stdout.
   --dry-run                 Report planned actions without writing.
   --doctor                  Check local install prerequisites/status.
-  --uninstall               Remove installed files, watcher plist, and optional legacy MCP entries.
-  --purge-state             With --uninstall, also remove wx-mcp state:
-                            ~/.config/wxcli/config.json, ~/.wx-mcp, logs,
+  --uninstall               Remove installed files, watcher plist, and optional MCP entries.
+  --purge-state             With --uninstall, also remove wechat-cli state:
+                            ~/.config/wxcli/config.json, ~/.wechat-cli, legacy ~/.wx-mcp, logs,
                             and the wxkey Keychain sudo credential.
-  --clear-state             Only remove wx-mcp state; keep installed binaries
+  --clear-state             Only remove wechat-cli state; keep installed binaries
                             and optional MCP entries.
 
 Environment:
-  WX_MCP_INSTALL_DIR        Override install directory.
-  WX_MCP_WCDB_DYLIB         Existing libWCDB.dylib to copy.
+  WECHAT_CLI_INSTALL_DIR    Override install directory. WX_MCP_INSTALL_DIR still works.
+  WECHAT_CLI_WCDB_DYLIB     Existing libWCDB.dylib to copy. WX_MCP_WCDB_DYLIB still works.
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
   WXKEY_GO_INSTALL          Go package/version for source fallback
@@ -176,9 +181,9 @@ print_human_result() {
   local ok="$1"
   print
   if [[ "$ok" == "true" ]]; then
-    print "wx-mcp $MODE complete"
+    print "$APP_NAME $MODE complete"
   else
-    print "wx-mcp $MODE failed"
+    print "$APP_NAME $MODE failed"
   fi
   print "  status: $INSTALL_STATUS"
   print "  install_dir: $INSTALL_DIR"
@@ -201,8 +206,8 @@ print_human_result() {
   fi
   if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
     print
-    print "Next: run $INSTALL_DIR/wx-mcp sessions to verify end-to-end access."
-    print "macOS quiet mode: add $INSTALL_DIR/wx-mcp and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
+    print "Next: run $INSTALL_DIR/$APP_NAME sessions to verify end-to-end access."
+    print "macOS quiet mode: add $INSTALL_DIR/$APP_NAME and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
   fi
 }
 
@@ -329,7 +334,7 @@ parse_args() {
         DO_BOOTSTRAP=1
         DO_REFRESH=1
         # watcher intentionally NOT in --all: on macOS 15+ the periodic
-        # cross-container access triggers TCC re-prompts ("wx-mcp 想访问其他
+        # cross-container access triggers TCC re-prompts ("wechat-cli 想访问其他
         # App 的数据") repeatedly for ad-hoc signed binaries. Users who
         # actually want background metadata cache refresh can pass --watcher.
         shift
@@ -452,18 +457,25 @@ resolve_components() {
     if have_cmd go; then
       WXMCP_MODE="build"
       WXMCP_SOURCE="$SOURCE_DIR"
-    elif [[ -x "$SOURCE_DIR/wx-mcp" ]]; then
+    elif [[ -x "$SOURCE_DIR/$APP_NAME" ]]; then
       WXMCP_MODE="copy"
-      WXMCP_SOURCE="$SOURCE_DIR/wx-mcp"
-      warn "go not found; using existing wx-mcp binary from source dir"
+      WXMCP_SOURCE="$SOURCE_DIR/$APP_NAME"
+      warn "go not found; using existing $APP_NAME binary from source dir"
+    elif [[ -x "$SOURCE_DIR/$LEGACY_APP_NAME" ]]; then
+      WXMCP_MODE="copy"
+      WXMCP_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
+      warn "go not found; using legacy $LEGACY_APP_NAME binary from source dir"
     else
-      ERRORS+=("go not found and no wx-mcp binary available")
+      ERRORS+=("go not found and no $APP_NAME binary available")
     fi
-  elif [[ -x "$SOURCE_DIR/wx-mcp" ]]; then
+  elif [[ -x "$SOURCE_DIR/$APP_NAME" ]]; then
     WXMCP_MODE="copy"
-    WXMCP_SOURCE="$SOURCE_DIR/wx-mcp"
+    WXMCP_SOURCE="$SOURCE_DIR/$APP_NAME"
+  elif [[ -x "$SOURCE_DIR/$LEGACY_APP_NAME" ]]; then
+    WXMCP_MODE="copy"
+    WXMCP_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
   else
-    ERRORS+=("wx-mcp source or binary not found under $SOURCE_DIR")
+    ERRORS+=("$APP_NAME source or binary not found under $SOURCE_DIR")
   fi
 
   if [[ -x "$SOURCE_DIR/wxkey" ]]; then
@@ -492,17 +504,17 @@ resolve_components() {
   fi
 
   local cand
-  for cand in "${WX_MCP_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib"; do
+  for cand in "${WECHAT_CLI_WCDB_DYLIB:-}" "${WX_MCP_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib" "$LEGACY_INSTALL_DIR/libWCDB.dylib"; do
     if [[ -f "$cand" ]]; then
       LIB_SOURCE="$cand"
       break
     fi
   done
   if [[ -z "$LIB_SOURCE" ]]; then
-    ERRORS+=("libWCDB.dylib not found; use release zip, set WX_MCP_WCDB_DYLIB, or place it at ./lib/libWCDB.dylib / ~/.config/wxcli/lib/libWCDB.dylib")
+    ERRORS+=("libWCDB.dylib not found; use release zip, set WECHAT_CLI_WCDB_DYLIB, or place it at ./lib/libWCDB.dylib / ~/.config/wxcli/lib/libWCDB.dylib")
   fi
 
-  [[ -n "$WXMCP_MODE" ]] && ACTIONS+=("$WXMCP_MODE wx-mcp from $WXMCP_SOURCE")
+  [[ -n "$WXMCP_MODE" ]] && ACTIONS+=("$WXMCP_MODE $APP_NAME from $WXMCP_SOURCE")
   [[ -n "$WXKEY_MODE" ]] && ACTIONS+=("$WXKEY_MODE wxkey from $WXKEY_SOURCE")
   [[ -n "$LIB_SOURCE" ]] && ACTIONS+=("copy libWCDB.dylib from $LIB_SOURCE")
 }
@@ -520,11 +532,11 @@ install_components() {
   mkdir -p "$INSTALL_DIR"
 
   if [[ "$WXMCP_MODE" == "build" ]]; then
-    run_logged_in "$WXMCP_SOURCE" go build -o "$INSTALL_DIR/wx-mcp" ./cmd/wx-mcp || die "build wx-mcp failed; see $INSTALL_LOG" 1
+    run_logged_in "$WXMCP_SOURCE" go build -o "$INSTALL_DIR/$APP_NAME" ./cmd/wx-mcp || die "build $APP_NAME failed; see $INSTALL_LOG" 1
   else
-    cp "$WXMCP_SOURCE" "$INSTALL_DIR/wx-mcp" || die "copy wx-mcp failed" 1
+    cp "$WXMCP_SOURCE" "$INSTALL_DIR/$APP_NAME" || die "copy $APP_NAME failed" 1
   fi
-  chmod +x "$INSTALL_DIR/wx-mcp"
+  chmod +x "$INSTALL_DIR/$APP_NAME"
 
   if [[ "$WXKEY_MODE" == "build" ]]; then
     run_logged_in "$WXKEY_SOURCE" go build -o "$INSTALL_DIR/wxkey" ./cmd/wxkey || die "build wxkey failed; see $INSTALL_LOG" 1
@@ -584,13 +596,14 @@ register_claude_mcp() {
   if ! have_cmd claude; then
     die "claude command not found; use --mcp-client none or install Claude Code" 1
   fi
-  ACTIONS+=("register Claude MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp serve-mcp")
+  ACTIONS+=("register Claude MCP server $MCP_NAME at $INSTALL_DIR/$APP_NAME serve-mcp")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
 
   run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
-  run_logged claude mcp add -s "$MCP_SCOPE" "$MCP_NAME" "$INSTALL_DIR/wx-mcp" serve-mcp || die "Claude MCP registration failed; see $INSTALL_LOG" 1
+  run_logged claude mcp remove -s "$MCP_SCOPE" "$LEGACY_MCP_NAME" || true
+  run_logged claude mcp add -s "$MCP_SCOPE" "$MCP_NAME" "$INSTALL_DIR/$APP_NAME" serve-mcp || die "Claude MCP registration failed; see $INSTALL_LOG" 1
   MCP_REGISTERED=1
   MCP_REGISTERED_CLIENTS+=("claude")
 }
@@ -599,13 +612,14 @@ register_codex_mcp() {
   if ! have_cmd codex; then
     die "codex command not found; use --mcp-client none or install Codex CLI" 1
   fi
-  ACTIONS+=("register Codex MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp serve-mcp")
+  ACTIONS+=("register Codex MCP server $MCP_NAME at $INSTALL_DIR/$APP_NAME serve-mcp")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
 
   run_logged codex mcp remove "$MCP_NAME" || true
-  run_logged codex mcp add "$MCP_NAME" -- "$INSTALL_DIR/wx-mcp" serve-mcp || die "Codex MCP registration failed; see $INSTALL_LOG" 1
+  run_logged codex mcp remove "$LEGACY_MCP_NAME" || true
+  run_logged codex mcp add "$MCP_NAME" -- "$INSTALL_DIR/$APP_NAME" serve-mcp || die "Codex MCP registration failed; see $INSTALL_LOG" 1
   MCP_REGISTERED=1
   MCP_REGISTERED_CLIENTS+=("codex")
 }
@@ -614,15 +628,17 @@ remove_mcp_entries() {
   [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" ]] || return
   local client="$MCP_CLIENT"
   if [[ "$client" == "auto" || "$client" == "claude" ]]; then
-    ACTIONS+=("remove Claude MCP server $MCP_NAME")
+    ACTIONS+=("remove Claude MCP server $MCP_NAME and legacy $LEGACY_MCP_NAME")
     if [[ "$DRY_RUN" -eq 0 && -n "$(command -v claude 2>/dev/null)" ]]; then
       run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
+      run_logged claude mcp remove -s "$MCP_SCOPE" "$LEGACY_MCP_NAME" || true
     fi
   fi
   if [[ "$client" == "auto" || "$client" == "codex" ]]; then
-    ACTIONS+=("remove Codex MCP server $MCP_NAME")
+    ACTIONS+=("remove Codex MCP server $MCP_NAME and legacy $LEGACY_MCP_NAME")
     if [[ "$DRY_RUN" -eq 0 && -n "$(command -v codex 2>/dev/null)" ]]; then
       run_logged codex mcp remove "$MCP_NAME" || true
+      run_logged codex mcp remove "$LEGACY_MCP_NAME" || true
     fi
   fi
 }
@@ -643,11 +659,11 @@ classify_install_log_blocker() {
       ;;
     *"task_for_pid"*|*"not permitted"*)
       BLOCKED_BY="task_for_pid_denied"
-      NEXT_ACTION="Rerun ./wxkey bootstrap from the Mac desktop session and enter the wx-mcp hidden admin-password prompt."
+      NEXT_ACTION="Rerun ./wxkey bootstrap from the Mac desktop session and enter the wechat-cli hidden admin-password prompt."
       ;;
     *"Full Disk Access"*|*"TCC"*|*"another app"*)
       BLOCKED_BY="full_disk_access"
-      NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wx-mcp/wx-mcp and ~/.local/share/wx-mcp/wxkey, then rerun install."
+      NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wechat-cli/wechat-cli and ~/.local/share/wechat-cli/wxkey, then rerun install."
       ;;
     *)
       BLOCKED_BY="bootstrap_failed"
@@ -677,18 +693,18 @@ run_bootstrap() {
 
 run_cache_refresh() {
   [[ "$DO_REFRESH" -eq 1 ]] || return
-  ACTIONS+=("start wx-mcp metadata cache refresh in background")
+  ACTIONS+=("start wechat-cli metadata cache refresh in background")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
-  if [[ "${WX_MCP_INSTALL_SYNC_REFRESH:-0}" == "1" ]]; then
-    ACTIONS+=("run wx-mcp metadata cache refresh in foreground because WX_MCP_INSTALL_SYNC_REFRESH=1")
-    run_logged "$INSTALL_DIR/wx-mcp" cache refresh || die "metadata cache refresh failed; see $INSTALL_LOG" 1
+  if [[ "${WECHAT_CLI_INSTALL_SYNC_REFRESH:-${WX_MCP_INSTALL_SYNC_REFRESH:-0}}" == "1" ]]; then
+    ACTIONS+=("run wechat-cli metadata cache refresh in foreground because WECHAT_CLI_INSTALL_SYNC_REFRESH=1")
+    run_logged "$INSTALL_DIR/$APP_NAME" cache refresh || die "metadata cache refresh failed; see $INSTALL_LOG" 1
     INSTALL_STATUS="ready"
   else
-    run_logged "$INSTALL_DIR/wx-mcp" cache refresh --background || die "metadata cache refresh background start failed; see $INSTALL_LOG" 1
+    run_logged "$INSTALL_DIR/$APP_NAME" cache refresh --background || die "metadata cache refresh background start failed; see $INSTALL_LOG" 1
     INSTALL_STATUS="warming_cache"
-    NEXT_ACTION="wx-mcp is installed; metadata cache refresh is warming in the background and name/session tools will freshness-check before returning data."
+    NEXT_ACTION="wechat-cli is installed; metadata cache refresh is warming in the background and name/session tools will freshness-check before returning data."
     CHECKS+=("cache_refresh_background=true")
   fi
   REFRESH_RAN=1
@@ -702,8 +718,8 @@ set -u
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 INSTALL_DIR=$(shell_escape "$INSTALL_DIR")
-LOG_DIR="\$HOME/Library/Logs/wx-mcp"
-STATE_DIR="\$HOME/.wx-mcp"
+LOG_DIR="\$HOME/Library/Logs/wechat-cli"
+STATE_DIR="\$HOME/.wechat-cli"
 LOCK_DIR="\$STATE_DIR/cache-refresh.lock"
 LOG_FILE="\$LOG_DIR/cache-watcher.log"
 
@@ -723,7 +739,7 @@ fi
 trap 'rmdir "\$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh start" >> "\$LOG_FILE"
-WX_MCP_CACHE_LOCK_HELD=1 "\$INSTALL_DIR/wx-mcp" cache refresh >> "\$LOG_FILE" 2>&1
+WECHAT_CLI_CACHE_LOCK_HELD=1 "\$INSTALL_DIR/$APP_NAME" cache refresh >> "\$LOG_FILE" 2>&1
 rc=\$?
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh exit=\$rc" >> "\$LOG_FILE"
 exit "\$rc"
@@ -777,25 +793,26 @@ install_watcher() {
 }
 
 cleanup_legacy_message_cache() {
-  local cache_root="$HOME/.wx-mcp/cache"
-  [[ -d "$cache_root" ]] || return
-  ACTIONS+=("drop existing cache indexes and non-metadata raw snapshots under $cache_root")
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    return
-  fi
-  local root child
-  for root in "$cache_root"/*; do
-    [[ -d "$root" ]] || continue
-    rm -f "$root/index.sqlite" "$root/index.sqlite-wal" "$root/index.sqlite-shm"
-    if [[ -d "$root/raw" ]]; then
-      for child in "$root/raw"/*; do
-        [[ -e "$child" ]] || continue
-        case "$(basename "$child")" in
-          contact|session) ;;
-          *) rm -rf "$child" ;;
-        esac
-      done
+  local cache_root root child
+  for cache_root in "$HOME/.wechat-cli/cache" "$HOME/.wx-mcp/cache"; do
+    [[ -d "$cache_root" ]] || continue
+    ACTIONS+=("drop existing cache indexes and non-metadata raw snapshots under $cache_root")
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      continue
     fi
+    for root in "$cache_root"/*; do
+      [[ -d "$root" ]] || continue
+      rm -f "$root/index.sqlite" "$root/index.sqlite-wal" "$root/index.sqlite-shm"
+      if [[ -d "$root/raw" ]]; then
+        for child in "$root/raw"/*; do
+          [[ -e "$child" ]] || continue
+          case "$(basename "$child")" in
+            contact|session) ;;
+            *) rm -rf "$child" ;;
+          esac
+        done
+      fi
+    done
   done
 }
 
@@ -804,7 +821,7 @@ doctor() {
   CHECKS+=("arch=$(uname -m)")
   [[ -d "$SOURCE_DIR" ]] && CHECKS+=("source_dir_exists=true") || WARNINGS+=("source_dir_missing=$SOURCE_DIR")
   [[ -d "$INSTALL_DIR" ]] && CHECKS+=("install_dir_exists=true") || CHECKS+=("install_dir_exists=false")
-  [[ -x "$INSTALL_DIR/wx-mcp" ]] && CHECKS+=("installed_wx_mcp=true") || CHECKS+=("installed_wx_mcp=false")
+  [[ -x "$INSTALL_DIR/$APP_NAME" ]] && CHECKS+=("installed_wechat_cli=true") || CHECKS+=("installed_wechat_cli=false")
   [[ -x "$INSTALL_DIR/wxkey" ]] && CHECKS+=("installed_wxkey=true") || CHECKS+=("installed_wxkey=false")
   [[ -f "$INSTALL_DIR/libWCDB.dylib" ]] && CHECKS+=("installed_libWCDB=true") || CHECKS+=("installed_libWCDB=false")
   have_cmd go && CHECKS+=("go=true") || CHECKS+=("go=false")
@@ -818,8 +835,8 @@ doctor() {
       CHECKS+=("watcher_loaded=false")
     fi
   fi
-  if [[ -x "$INSTALL_DIR/wx-mcp" ]]; then
-    if run_logged "$INSTALL_DIR/wx-mcp" cache status; then
+  if [[ -x "$INSTALL_DIR/$APP_NAME" ]]; then
+    if run_logged "$INSTALL_DIR/$APP_NAME" cache status; then
       CHECKS+=("cache_status_ok=true")
     else
       CHECKS+=("cache_status_ok=false")
@@ -835,19 +852,21 @@ sudo_keychain_account() {
   elif [[ -n "${USER:-}" ]]; then
     print -r -- "$USER"
   else
-    id -un 2>/dev/null || print -r -- "wx-mcp"
+    id -un 2>/dev/null || print -r -- "$APP_NAME"
   fi
 }
 
 queue_purge_state_actions() {
   ACTIONS+=("remove wxkey config file $HOME/.config/wxcli/config.json")
-  ACTIONS+=("remove wx-mcp state dir $HOME/.wx-mcp")
-  ACTIONS+=("remove wx-mcp logs $LOG_DIR")
+  ACTIONS+=("remove wechat-cli state dir $HOME/.wechat-cli")
+  ACTIONS+=("remove legacy wx-mcp state dir $HOME/.wx-mcp")
+  ACTIONS+=("remove wechat-cli logs $LOG_DIR")
   ACTIONS+=("delete Keychain generic password r266.wx-mcp.sudo for account $(sudo_keychain_account)")
 }
 
 run_purge_state() {
   rm -f "$HOME/.config/wxcli/config.json"
+  rm -rf "$HOME/.wechat-cli"
   rm -rf "$HOME/.wx-mcp"
   if [[ -x /usr/bin/security ]]; then
     /usr/bin/security delete-generic-password -a "$(sudo_keychain_account)" -s "r266.wx-mcp.sudo" >/dev/null 2>&1 || true
@@ -856,7 +875,7 @@ run_purge_state() {
 }
 
 remove_watcher() {
-  ACTIONS+=("remove watcher $WATCHER_LABEL")
+  ACTIONS+=("remove watcher $WATCHER_LABEL and legacy $LEGACY_WATCHER_LABEL")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
@@ -865,7 +884,12 @@ remove_watcher() {
     run_logged launchctl bootout "$domain" "$PLIST_PATH" || true
     rm -f "$PLIST_PATH"
   fi
+  if [[ -f "$LEGACY_PLIST_PATH" ]]; then
+    run_logged launchctl bootout "$domain" "$LEGACY_PLIST_PATH" || true
+    rm -f "$LEGACY_PLIST_PATH"
+  fi
   rm -f "$INSTALL_DIR/watcher.sh"
+  rm -f "$LEGACY_INSTALL_DIR/watcher.sh"
 }
 
 clear_state() {
@@ -880,6 +904,7 @@ clear_state() {
 uninstall() {
   remove_watcher
   ACTIONS+=("remove install dir $INSTALL_DIR")
+  ACTIONS+=("remove legacy install dir $LEGACY_INSTALL_DIR")
   remove_mcp_entries
   if [[ "$PURGE_STATE" -eq 1 ]]; then
     queue_purge_state_actions
@@ -889,6 +914,7 @@ uninstall() {
   fi
 
   rm -rf "$INSTALL_DIR"
+  rm -rf "$LEGACY_INSTALL_DIR"
   if [[ "$PURGE_STATE" -eq 1 ]]; then
     run_purge_state
   fi

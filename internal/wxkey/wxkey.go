@@ -1,8 +1,8 @@
-// Package wxkey is wx-mcp's thin client for the standalone `wxkey` CLI.
+// Package wxkey is wechat-cli's thin client for the standalone `wxkey` CLI.
 // The CLI handles task_for_pid + memory scan + SQLCipher verification;
 // this package finds the binary,
 // invokes `wxkey setup`, and parses the JSON it prints to stdout. First-run
-// human/agent setup should usually call `wxkey bootstrap` explicitly; wx-mcp
+// human/agent setup should usually call `wxkey bootstrap` explicitly; wechat-cli
 // keeps runtime startup on the narrower setup path so it does not silently
 // re-sign or restart WeChat.
 package wxkey
@@ -40,11 +40,11 @@ func FindBinary() (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("wxkey binary not found — set $WX_KEY_BIN, install wxkey alongside wx-mcp, or put wxkey on PATH")
+	return "", fmt.Errorf("wxkey binary not found — set $WX_KEY_BIN, install wxkey alongside wechat-cli, or put wxkey on PATH")
 }
 
 // SetupResult mirrors what `wxkey setup` writes to stdout. We only consume
-// the bits wx-mcp needs.
+// the bits wechat-cli needs.
 type SetupResult struct {
 	PID           int               `json:"pid"`
 	Root          string            `json:"scan_root"`
@@ -89,7 +89,7 @@ type ImageKeyCommandResult struct {
 //
 // The macOS path intentionally does not run `wxkey bootstrap`, because
 // bootstrap may quit, ad-hoc re-sign, and reopen WeChat.
-// stderrText is also returned so wx-mcp can surface progress / errors.
+// stderrText is also returned so wechat-cli can surface progress / errors.
 func RunSetup() (*SetupResult, string, error) {
 	return runSetup()
 }

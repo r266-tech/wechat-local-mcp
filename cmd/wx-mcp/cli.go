@@ -151,7 +151,7 @@ func runToolsCLI() {
 
 func runGenericToolCLI(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: wx-mcp call <tool> [--key value ...]")
+		fmt.Fprintf(os.Stderr, "usage: %s call <tool> [--key value ...]\n", appName)
 		os.Exit(2)
 	}
 	runToolCLI(args[0], parseKVFlags(args[1:]))
@@ -159,7 +159,7 @@ func runGenericToolCLI(args []string) {
 
 func runToolJSONCLI(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: wx-mcp call-json <tool> '<json args>'")
+		fmt.Fprintf(os.Stderr, "usage: %s call-json <tool> '<json args>'\n", appName)
 		os.Exit(2)
 	}
 	raw := ""
@@ -389,41 +389,46 @@ func printCLIUsage() {
 }
 
 func printCLIUsageTo(w io.Writer) {
-	fmt.Fprint(w, `wx-mcp - local WeChat data CLI
+	fmt.Fprintf(w, `%s - local WeChat data CLI
 
 General:
-  wx-mcp --help
-  wx-mcp tools
-  wx-mcp call <tool> [--key value ...]
-  wx-mcp call-json <tool> '{"key":"value"}'
-  wx-mcp serve-mcp                         # optional legacy MCP stdio adapter
+  %s --help
+  %s tools
+  %s call <tool> [--key value ...]
+  %s call-json <tool> '{"key":"value"}'
+  %s serve-mcp                         # optional legacy MCP stdio adapter
 
 Cache CLI:
-  wx-mcp cache status
-  wx-mcp cache refresh [--force] [--background]
-  wx-mcp cache rebuild
+  %s cache status
+  %s cache refresh [--force] [--background]
+  %s cache rebuild
 
 Query/export CLI:
-  wx-mcp sessions [--limit 20] [--type-filter private,group]
-  wx-mcp resolve-chat "张三"
-  wx-mcp history "张三" [--limit 50] [--after 2026-05-11] [--view agent] [--include-media-paths=false]
-  wx-mcp timeline "张三" [--limit 10] [--display-order asc]
-  wx-mcp media "张三" [--local-id 123] [--type image|video|file]
-  wx-mcp search "关键词" [--in "某群"] [--after 2026-01-01] [--type text]
-  wx-mcp contacts [--keyword 李]
-  wx-mcp members "某群"
-  wx-mcp unread [--limit 50]
-  wx-mcp stats
-  wx-mcp favorites [--limit 20]
-  wx-mcp red-packets [--limit 20]
-  wx-mcp transfers [--limit 20]
-  wx-mcp sns-feed [--limit 20]
-  wx-mcp sns-search "关键词"
-  wx-mcp sns-notifications [--include-read]
-  wx-mcp schema [--subdir session] [--file session.db]
-  wx-mcp sql "select count(*) from Session"
-  wx-mcp announcements [--limit 20]
-  wx-mcp forward-history [--limit 20]
-  wx-mcp export "张三" --path /tmp/messages.jsonl [--format jsonl|markdown|html]
-`)
+  %s sessions [--limit 20] [--type-filter private,group]
+  %s resolve-chat "张三"
+  %s history "张三" [--limit 50] [--after 2026-05-11] [--view agent] [--include-media-paths=false]
+  %s timeline "张三" [--limit 10] [--display-order asc]
+  %s media "张三" [--local-id 123] [--type image|video|file]
+  %s search "关键词" [--in "某群"] [--after 2026-01-01] [--type text]
+  %s contacts [--keyword 李]
+  %s members "某群"
+  %s unread [--limit 50]
+  %s stats
+  %s favorites [--limit 20]
+  %s red-packets [--limit 20]
+  %s transfers [--limit 20]
+  %s sns-feed [--limit 20]
+  %s sns-search "关键词"
+  %s sns-notifications [--include-read]
+  %s schema [--subdir session] [--file session.db]
+  %s sql "select count(*) from Session"
+  %s announcements [--limit 20]
+  %s forward-history [--limit 20]
+  %s export "张三" --path /tmp/messages.jsonl [--format jsonl|markdown|html]
+`, appName,
+		appName, appName, appName, appName, appName,
+		appName, appName, appName,
+		appName, appName, appName, appName, appName, appName, appName, appName,
+		appName, appName, appName, appName, appName, appName, appName, appName,
+		appName, appName, appName, appName, appName)
 }

@@ -1,11 +1,11 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-REPO="${WX_MCP_REPO:-https://github.com/r266-tech/wechat-local-mcp}"
-TAG="${WX_MCP_RELEASE_TAG:-latest}"
-ASSET="${WX_MCP_RELEASE_ASSET:-wx-mcp-latest-darwin-arm64.zip}"
-KEEP_DOWNLOAD="${WX_MCP_KEEP_DOWNLOAD:-0}"
-JSON="${WX_MCP_INSTALL_JSON:-0}"
+REPO="${WECHAT_CLI_REPO:-${WX_MCP_REPO:-https://github.com/r266-tech/wechat-local-mcp}}"
+TAG="${WECHAT_CLI_RELEASE_TAG:-${WX_MCP_RELEASE_TAG:-latest}}"
+ASSET="${WECHAT_CLI_RELEASE_ASSET:-${WX_MCP_RELEASE_ASSET:-wechat-cli-latest-darwin-arm64.zip}}"
+KEEP_DOWNLOAD="${WECHAT_CLI_KEEP_DOWNLOAD:-${WX_MCP_KEEP_DOWNLOAD:-0}}"
+JSON="${WECHAT_CLI_INSTALL_JSON:-${WX_MCP_INSTALL_JSON:-0}}"
 MODE="install"
 DRY_RUN=0
 CLEANUP_DIR=""
@@ -20,11 +20,11 @@ Usage:
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [installer args...]
 
 Environment:
-  WX_MCP_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-local-mcp.
-  WX_MCP_RELEASE_TAG      GitHub release tag. Default: latest.
-  WX_MCP_RELEASE_ASSET    Release asset name. Default: wx-mcp-latest-darwin-arm64.zip.
-  WX_MCP_INSTALL_JSON     Pass --json to the bundled installer when set to 1.
-  WX_MCP_KEEP_DOWNLOAD    Keep the temporary download directory when set to 1.
+  WECHAT_CLI_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-local-mcp.
+  WECHAT_CLI_RELEASE_TAG      GitHub release tag. Default: latest.
+  WECHAT_CLI_RELEASE_ASSET    Release asset name. Default: wechat-cli-latest-darwin-arm64.zip.
+  WECHAT_CLI_INSTALL_JSON     Pass --json to the bundled installer when set to 1.
+  WECHAT_CLI_KEEP_DOWNLOAD    Keep the temporary download directory when set to 1.
 EOF
 }
 
@@ -77,7 +77,7 @@ download_file() {
   elif have_cmd wget; then
     wget -O "$dest" "$url"
   else
-    fail "curl or wget is required to download wx-mcp."
+    fail "curl or wget is required to download wechat-cli."
   fi
 }
 
@@ -216,7 +216,7 @@ main() {
   slug="$(repo_slug "$REPO")"
   base="$(repo_url "$REPO")"
   url="$(asset_url "$base" "$slug" "$TAG" "$ASSET")"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/wx-mcp-install.XXXXXX")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/wechat-cli-install.XXXXXX")"
   if [[ "$KEEP_DOWNLOAD" != "1" ]]; then
     CLEANUP_DIR="$tmp"
     trap cleanup_download EXIT INT TERM
@@ -229,14 +229,14 @@ main() {
   extract="$tmp/extract"
   mkdir -p "$extract"
 
-  say "Downloading wx-mcp release: $url"
+  say "Downloading wechat-cli release: $url"
   if ! download_file "$url" "$zip"; then
     warn "stable asset download failed; querying GitHub release metadata."
     fallback="$(fallback_asset_url "$slug" "$TAG")"
     [[ -n "$fallback" ]] || fail "could not find a darwin-arm64 release asset for $slug."
     url="$fallback"
     zip="$tmp/${fallback:t}"
-    say "Downloading wx-mcp release: $url"
+    say "Downloading wechat-cli release: $url"
     download_file "$url" "$zip"
   fi
 

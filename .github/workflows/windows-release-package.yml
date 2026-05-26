@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "wx-mcp release version without leading v"
+        description: "wechat-cli release version without leading v"
         required: true
-        default: "1.5.5"
+        default: "1.6.0"
       wcdb_version:
         description: "Tencent/WCDB release version without leading v"
         required: true
@@ -27,7 +27,7 @@ jobs:
         run: |
           .\scripts\build-windows-wcdb.ps1 -WcdbVersion "${{ inputs.wcdb_version }}" -OutDir .\lib
 
-      - name: Package wx-mcp for Windows
+      - name: Package wechat-cli for Windows
         shell: powershell
         run: |
           .\scripts\package-windows.ps1 -Version "${{ inputs.version }}" -WcdbLib .\lib\libWCDB.dll
@@ -37,13 +37,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $version = "${{ inputs.version }}"
-          $zip = ".\dist\wx-mcp-v$version-windows-amd64.zip"
-          $extractRoot = Join-Path $env:RUNNER_TEMP "wx-mcp-package-smoke"
+          $zip = ".\dist\wechat-cli-v$version-windows-amd64.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "wechat-cli-package-smoke"
           if (Test-Path $extractRoot) {
             Remove-Item -LiteralPath $extractRoot -Recurse -Force
           }
           Expand-Archive -LiteralPath $zip -DestinationPath $extractRoot -Force
-          $pkg = Join-Path $extractRoot "wx-mcp-v$version-windows-amd64"
+          $pkg = Join-Path $extractRoot "wechat-cli-v$version-windows-amd64"
           $result = & (Join-Path $pkg "install.ps1") -DryRun -All -Json | ConvertFrom-Json
           if ($result.platform -ne "windows" -or $result.status -ne "dry_run" -or -not $result.dry_run) {
             $result | ConvertTo-Json -Depth 8
@@ -52,10 +52,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wx-mcp-windows-amd64-${{ inputs.version }}
+          name: wechat-cli-windows-amd64-${{ inputs.version }}
           path: |
-            dist/wx-mcp-v${{ inputs.version }}-windows-amd64.zip
-            dist/wx-mcp-v${{ inputs.version }}-windows-amd64.zip.sha256
-            dist/wx-mcp-latest-windows-amd64.zip
-            dist/wx-mcp-latest-windows-amd64.zip.sha256
+            dist/wechat-cli-v${{ inputs.version }}-windows-amd64.zip
+            dist/wechat-cli-v${{ inputs.version }}-windows-amd64.zip.sha256
+            dist/wechat-cli-latest-windows-amd64.zip
+            dist/wechat-cli-latest-windows-amd64.zip.sha256
           if-no-files-found: error

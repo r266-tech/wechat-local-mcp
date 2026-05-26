@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-// Config is wx-mcp's persistent state. By default it lives at
-// ~/.config/wxcli/config.json on every platform; WX_MCP_CONFIG can point at an
-// explicit file.
+// Config is wechat-cli's persistent key map. By default it intentionally stays
+// at ~/.config/wxcli/config.json for wxkey / wx-cli compatibility;
+// WECHAT_CLI_CONFIG or the legacy WX_MCP_CONFIG can point at an explicit file.
 //
 // Schema 2 carries a per-DB enc_key map: each WCDB file's SQLCipher salt maps
 // to its 32-byte post-PBKDF2 encryption key. This is the only ready runtime
@@ -29,7 +29,7 @@ type Config struct {
 }
 
 // Ready reports whether the config has enough material to open WCDB files via
-// wx-mcp's supported runtime path: schema-2 per-salt enc_keys.
+// wechat-cli's supported runtime path: schema-2 per-salt enc_keys.
 func (c *Config) Ready() bool {
 	if c == nil {
 		return false
@@ -50,7 +50,7 @@ func dir() (string, error) {
 }
 
 func Path() (string, error) {
-	if p := strings.TrimSpace(os.Getenv("WX_MCP_CONFIG")); p != "" {
+	if p := firstEnv("WECHAT_CLI_CONFIG", "WX_MCP_CONFIG"); p != "" {
 		return filepath.Clean(p), nil
 	}
 	d, err := dir()
@@ -101,13 +101,13 @@ func applyEnvOverrides(c *Config) {
 	if c == nil {
 		return
 	}
-	if root := strings.TrimSpace(os.Getenv("WX_MCP_DB_ROOT")); root != "" {
+	if root := firstEnv("WECHAT_CLI_DB_ROOT", "WX_MCP_DB_ROOT"); root != "" {
 		c.DBRoot = filepath.Clean(root)
 		if c.Wxid == "" {
 			c.Wxid = wxidFromAccountDir(c.DBRoot)
 		}
 	}
-	if key := strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")); key != "" {
+	if key := firstEnv("WECHAT_CLI_IMAGE_KEY", "WX_MCP_IMAGE_KEY"); key != "" {
 		c.ImageKey = key
 	}
 }
@@ -124,10 +124,10 @@ func DefaultWeChatBase() (string, error) {
 }
 
 func AutoDetectDBRoot() (string, string, error) {
-	if root := strings.TrimSpace(os.Getenv("WX_MCP_DB_ROOT")); root != "" {
+	if root := firstEnv("WECHAT_CLI_DB_ROOT", "WX_MCP_DB_ROOT"); root != "" {
 		root = filepath.Clean(root)
 		if _, err := os.Stat(filepath.Join(root, "db_storage")); err != nil {
-			return "", "", fmt.Errorf("WX_MCP_DB_ROOT=%s does not contain db_storage: %w", root, err)
+			return "", "", fmt.Errorf("WECHAT_CLI_DB_ROOT=%s does not contain db_storage: %w", root, err)
 		}
 		return root, wxidFromAccountDir(root), nil
 	}
@@ -171,7 +171,16 @@ func AutoDetectDBRoot() (string, string, error) {
 	for _, c := range cands {
 		lines = append(lines, fmt.Sprintf("  %s  (wxid=%s)", c.full, c.wxid))
 	}
-	return "", "", fmt.Errorf("multiple WeChat accounts found; refusing to autodetect.\nCandidates:\n%s\nSet WX_MCP_DB_ROOT to the intended account directory", strings.Join(lines, "\n"))
+	return "", "", fmt.Errorf("multiple WeChat accounts found; refusing to autodetect.\nCandidates:\n%s\nSet WECHAT_CLI_DB_ROOT to the intended account directory", strings.Join(lines, "\n"))
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func wxidFromAccountDir(path string) string {

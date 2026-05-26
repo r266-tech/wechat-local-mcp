@@ -11,13 +11,13 @@ import (
 
 func cacheLogDir() (string, error) {
 	if p := os.Getenv("LOCALAPPDATA"); p != "" {
-		return filepath.Join(p, "wx-mcp", "logs"), nil
+		return filepath.Join(p, appName, "logs"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".wx-mcp", "logs"), nil
+	return filepath.Join(home, stateDirName, "logs"), nil
 }
 
 func configureBackgroundCommand(cmd *exec.Cmd) {

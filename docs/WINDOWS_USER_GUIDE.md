@@ -1,14 +1,14 @@
-# wx-mcp Windows User Guide
+# wechat-cli Windows User Guide
 
-This guide is for Windows users who want to install and use `wx-mcp` with a
+This guide is for Windows users who want to install and use `wechat-cli` with a
 logged-in Windows WeChat account.
 
-## What wx-mcp Does
+## What wechat-cli Does
 
-`wx-mcp` reads the local Windows WeChat database and exposes chat, contact,
-search, media, stats, and export tools to MCP clients such as Codex or Claude.
+`wechat-cli` reads the local Windows WeChat database and exposes chat, contact,
+search, media, stats, and export commands as JSON.
 
-On Windows, `wx-mcp` can automatically scan the running `Weixin.exe` or
+On Windows, `wechat-cli` can automatically scan the running `Weixin.exe` or
 `WeChat.exe` process for SQLCipher raw keys. It verifies those keys against the
 configured WeChat databases, then stores a schema-2 key map in:
 
@@ -23,8 +23,8 @@ Keys are not printed to terminal output or install logs.
 A Windows package should contain these files:
 
 ```text
-wx-mcp\
-  wx-mcp.exe
+wechat-cli\
+  wechat-cli.exe
   libWCDB.dll
   install.ps1
   mcp-server.json
@@ -36,7 +36,7 @@ wx-mcp\
 ```
 
 `libWCDB.dll` may also be a SQLCipher-compatible DLL that exports the SQLite and
-SQLCipher symbols used by `wx-mcp`.
+SQLCipher symbols used by `wechat-cli`.
 
 ## Requirements
 
@@ -44,9 +44,9 @@ SQLCipher symbols used by `wx-mcp`.
 - Windows WeChat 4.x installed and logged in.
 - At least one chat opened after login, so the database keys are present in the
   running WeChat process.
-- `wx-mcp.exe` and `libWCDB.dll` in the same install directory.
+- `wechat-cli.exe` and `libWCDB.dll` in the same install directory.
 - If WeChat data is not in a default location, the account directory must be
-  configured with `WX_MCP_DB_ROOT`.
+  configured with `WECHAT_CLI_DB_ROOT`.
 
 The account directory is the folder that directly contains `db_storage`.
 
@@ -65,45 +65,45 @@ Use the account directory itself, not `E:\Wechat` and not `db_storage`.
 Open PowerShell in the package directory:
 
 ```powershell
-cd D:\wx-mcp
+cd D:\wechat-cli
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -All -Json
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
 ```
 
-By default, the installer uses `%LOCALAPPDATA%\wx-mcp` unless an install
+By default, the installer uses `%LOCALAPPDATA%\wechat-cli` unless an install
 directory is provided.
 
 `-All` runs the first `cache refresh --force` in the foreground. The installer
-only returns `status=ready` after `wx-mcp` has verified Windows key extraction
+only returns `status=ready` after `wechat-cli` has verified Windows key extraction
 and built the cache. If you only want to start refresh in the background, add
 `-BackgroundRefresh`; in that mode `status=warming_cache` means the background
 process was launched, not that key extraction has already completed.
 
-## Install To D:\wx-mcp
+## Install To D:\wechat-cli
 
-To install directly into `D:\wx-mcp`:
+To install directly into `D:\wechat-cli`:
 
 ```powershell
-cd D:\wx-mcp-source
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json -InstallDir D:\wx-mcp
+cd D:\wechat-cli-source
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json -InstallDir D:\wechat-cli
 ```
 
 Equivalent environment variable:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("WX_MCP_INSTALL_DIR", "D:\wx-mcp", "User")
+[Environment]::SetEnvironmentVariable("WECHAT_CLI_INSTALL_DIR", "D:\wechat-cli", "User")
 ```
 
 Open a new PowerShell window after setting persistent environment variables.
 
 ## Configure A Non-Default WeChat Data Root
 
-If WeChat data is under a custom path, set `WX_MCP_DB_ROOT` to the account
+If WeChat data is under a custom path, set `WECHAT_CLI_DB_ROOT` to the account
 directory:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
-  "WX_MCP_DB_ROOT",
+  "WECHAT_CLI_DB_ROOT",
   "E:\Wechat\message\xwechat_files\wxid_xxxxx_1234",
   "User"
 )
@@ -112,18 +112,18 @@ directory:
 For the current PowerShell session only:
 
 ```powershell
-$env:WX_MCP_DB_ROOT = "E:\Wechat\message\xwechat_files\wxid_xxxxx_1234"
+$env:WECHAT_CLI_DB_ROOT = "E:\Wechat\message\xwechat_files\wxid_xxxxx_1234"
 ```
 
 Then run:
 
 ```powershell
-D:\wx-mcp\wx-mcp.exe cache refresh --force
+D:\wechat-cli\wechat-cli.exe cache refresh --force
 ```
 
 ## Multiple Accounts
 
-If more than one account directory exists, set `WX_MCP_DB_ROOT` explicitly.
+If more than one account directory exists, set `WECHAT_CLI_DB_ROOT` explicitly.
 
 Example discovery command:
 
@@ -137,26 +137,26 @@ Pick the directory that directly contains `db_storage`.
 
 ## Optional Process Overrides
 
-Normally no process override is needed. `wx-mcp` scans running `Weixin.exe` and
+Normally no process override is needed. `wechat-cli` scans running `Weixin.exe` and
 `WeChat.exe` processes.
 
 If key extraction fails, specify the WeChat process id:
 
 ```powershell
 Get-Process Weixin
-[Environment]::SetEnvironmentVariable("WX_MCP_WECHAT_PID", "12345", "User")
+[Environment]::SetEnvironmentVariable("WECHAT_CLI_WECHAT_PID", "12345", "User")
 ```
 
 Or only for the current terminal:
 
 ```powershell
-$env:WX_MCP_WECHAT_PID = "12345"
+$env:WECHAT_CLI_WECHAT_PID = "12345"
 ```
 
 If a future WeChat build uses a different process name:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("WX_MCP_WECHAT_PROCESS", "Weixin,WeChat", "User")
+[Environment]::SetEnvironmentVariable("WECHAT_CLI_WECHAT_PROCESS", "Weixin,WeChat", "User")
 ```
 
 ## Verify The Install
@@ -164,10 +164,10 @@ If a future WeChat build uses a different process name:
 Run:
 
 ```powershell
-D:\wx-mcp\wx-mcp.exe cache status
-D:\wx-mcp\wx-mcp.exe cache refresh --force
-D:\wx-mcp\wx-mcp.exe sessions --limit 5
-D:\wx-mcp\wx-mcp.exe contacts --limit 5
+D:\wechat-cli\wechat-cli.exe cache status
+D:\wechat-cli\wechat-cli.exe cache refresh --force
+D:\wechat-cli\wechat-cli.exe sessions --limit 5
+D:\wechat-cli\wechat-cli.exe contacts --limit 5
 ```
 
 A healthy refresh contains non-zero counts for contacts and sessions. Chat
@@ -190,16 +190,16 @@ Example success shape:
 ## Common CLI Commands
 
 ```powershell
-D:\wx-mcp\wx-mcp.exe sessions --limit 20
-D:\wx-mcp\wx-mcp.exe contacts --limit 20
-D:\wx-mcp\wx-mcp.exe search "keyword" --limit 20
-D:\wx-mcp\wx-mcp.exe history "contact or group name" --limit 50
-D:\wx-mcp\wx-mcp.exe media "contact or group name" --type image --limit 10
-D:\wx-mcp\wx-mcp.exe stats "contact or group name"
+D:\wechat-cli\wechat-cli.exe sessions --limit 20
+D:\wechat-cli\wechat-cli.exe contacts --limit 20
+D:\wechat-cli\wechat-cli.exe search "keyword" --limit 20
+D:\wechat-cli\wechat-cli.exe history "contact or group name" --limit 50
+D:\wechat-cli\wechat-cli.exe media "contact or group name" --type image --limit 10
+D:\wechat-cli\wechat-cli.exe stats "contact or group name"
 ```
 
-When used through an MCP client, call tools such as `sessions`, `messages`,
-`search`, `contacts`, `media_resources`, `stats`, and `export_messages`.
+If an MCP client is explicitly required, register the optional compatibility
+adapter with `-Mcp`; the adapter runs `wechat-cli.exe serve-mcp`.
 
 ## Troubleshooting
 
@@ -213,7 +213,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Jso
 
 ### No account directory with db_storage found
 
-Set `WX_MCP_DB_ROOT` to the account directory that directly contains
+Set `WECHAT_CLI_DB_ROOT` to the account directory that directly contains
 `db_storage`.
 
 ### No running Weixin.exe or WeChat.exe process found
@@ -221,43 +221,44 @@ Set `WX_MCP_DB_ROOT` to the account directory that directly contains
 Start Windows WeChat, log in, open at least one chat, and rerun:
 
 ```powershell
-D:\wx-mcp\wx-mcp.exe cache refresh --force
+D:\wechat-cli\wechat-cli.exe cache refresh --force
 ```
 
 ### No usable Windows WeChat raw keys found
 
-Check that `WX_MCP_DB_ROOT` belongs to the same account currently logged in to
-Windows WeChat. If multiple WeChat processes exist, set `WX_MCP_WECHAT_PID`.
+Check that `WECHAT_CLI_DB_ROOT` belongs to the same account currently logged in to
+Windows WeChat. If multiple WeChat processes exist, set `WECHAT_CLI_WECHAT_PID`.
 
 ### DLL not found
 
-Put `libWCDB.dll` beside `wx-mcp.exe`, or set:
+Put `libWCDB.dll` beside `wechat-cli.exe`, or set:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("WX_MCP_WCDB_LIB", "D:\wx-mcp\libWCDB.dll", "User")
+[Environment]::SetEnvironmentVariable("WECHAT_CLI_WCDB_LIB", "D:\wechat-cli\libWCDB.dll", "User")
 ```
 
 ### Installed exe is in use during update
 
-Close the MCP client or stop old `wx-mcp.exe` processes:
+Close terminals, agents, or optional MCP clients that are still using
+`wechat-cli.exe`, or stop old processes:
 
 ```powershell
-Get-Process wx-mcp -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process wechat-cli -ErrorAction SilentlyContinue | Stop-Process -Force
 ```
 
 Then rerun the installer.
 
 ## Privacy And Safety
 
-- `wx-mcp` reads local WeChat databases on the same Windows user account.
+- `wechat-cli` reads local WeChat databases on the same Windows user account.
 - Extracted database keys are stored in the local user config file.
 - Do not share `config.json`, cache files, or plaintext snapshots.
-- Do not upload `C:\Users\<you>\.wx-mcp\cache` or `C:\Users\<you>\.config\wxcli`
+- Do not upload `C:\Users\<you>\.wechat-cli\cache` or `C:\Users\<you>\.config\wxcli`
   to issue trackers or chat systems.
 
 ## Reset / Uninstall
 
-Use the installer so MCP client registrations are removed as well as files.
+Use the installer so optional MCP client registrations are removed as well as files.
 
 Clear keys/cache/logs but keep the installed binaries:
 
@@ -265,7 +266,7 @@ Clear keys/cache/logs but keep the installed binaries:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ClearState -Yes -Json
 ```
 
-Uninstall binaries and MCP registration while keeping keys/cache:
+Uninstall binaries and optional MCP registration while keeping keys/cache:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Yes -Json
@@ -278,5 +279,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Pu
 ```
 
 `-ClearState` / `-PurgeState` delete
-`%USERPROFILE%\.config\wxcli\config.json`, `%USERPROFILE%\.wx-mcp`, and
+`%USERPROFILE%\.config\wxcli\config.json`, `%USERPROFILE%\.wechat-cli`, and
 installer logs, but keep `%USERPROFILE%\.config\wxcli\lib`.

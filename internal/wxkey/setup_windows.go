@@ -130,7 +130,7 @@ func runSetup() (*SetupResult, string, error) {
 		return nil, "", err
 	}
 	if len(procs) == 0 {
-		return nil, "", fmt.Errorf("no running Weixin.exe/WeChat.exe process found; log in to Windows WeChat first or set WX_MCP_WECHAT_PID")
+		return nil, "", fmt.Errorf("no running Weixin.exe/WeChat.exe process found; log in to Windows WeChat first or set WECHAT_CLI_WECHAT_PID")
 	}
 
 	found := map[string]string{}
@@ -171,7 +171,7 @@ func runSetup() (*SetupResult, string, error) {
 		})
 	}
 	if len(verified) == 0 {
-		return nil, "", fmt.Errorf("no usable Windows WeChat raw keys found after scanning %d process(es); ensure WX_MCP_DB_ROOT matches the logged-in account", stats.ScannedProcesses)
+		return nil, "", fmt.Errorf("no usable Windows WeChat raw keys found after scanning %d process(es); ensure WECHAT_CLI_DB_ROOT matches the logged-in account", stats.ScannedProcesses)
 	}
 
 	for salt, key := range verified {
@@ -202,7 +202,7 @@ func runSetup() (*SetupResult, string, error) {
 func windowsFindWCDB() (string, error) {
 	names := []string{"libWCDB.dll", "WCDB.dll", "e_sqlcipher.dll"}
 	var candidates []string
-	for _, env := range []string{"WX_MCP_WCDB_LIB", "WX_MCP_WCDB_DYLIB"} {
+	for _, env := range []string{"WECHAT_CLI_WCDB_LIB", "WECHAT_CLI_WCDB_DYLIB", "WX_MCP_WCDB_LIB", "WX_MCP_WCDB_DYLIB"} {
 		if p := strings.TrimSpace(os.Getenv(env)); p != "" {
 			candidates = append(candidates, p)
 		}
@@ -282,7 +282,7 @@ func windowsVerifyDBKey(path, keyHex, saltHex string) bool {
 }
 
 func windowsTargetProcesses() ([]windowsProcess, error) {
-	if raw := strings.TrimSpace(os.Getenv("WX_MCP_WECHAT_PID")); raw != "" {
+	if raw := firstEnv("WECHAT_CLI_WECHAT_PID", "WX_MCP_WECHAT_PID"); raw != "" {
 		var out []windowsProcess
 		for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
 			if part == "" {
@@ -290,14 +290,14 @@ func windowsTargetProcesses() ([]windowsProcess, error) {
 			}
 			pid, err := strconv.ParseUint(part, 10, 32)
 			if err != nil {
-				return nil, fmt.Errorf("parse WX_MCP_WECHAT_PID=%q: %w", raw, err)
+				return nil, fmt.Errorf("parse WECHAT_CLI_WECHAT_PID=%q: %w", raw, err)
 			}
 			out = append(out, windowsProcess{pid: uint32(pid), exe: "env"})
 		}
 		return out, nil
 	}
 	names := map[string]bool{"weixin.exe": true, "wechat.exe": true}
-	if raw := strings.TrimSpace(os.Getenv("WX_MCP_WECHAT_PROCESS")); raw != "" {
+	if raw := firstEnv("WECHAT_CLI_WECHAT_PROCESS", "WX_MCP_WECHAT_PROCESS"); raw != "" {
 		names = map[string]bool{}
 		for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
 			part = strings.ToLower(strings.TrimSpace(part))
@@ -331,6 +331,15 @@ func windowsTargetProcesses() ([]windowsProcess, error) {
 		return out[i].pid < out[j].pid
 	})
 	return out, nil
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func windowsEnumerateProcesses() ([]windowsProcess, error) {

@@ -80,7 +80,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "resolve_chat",
-		Description: "把昵称/备注/alias/群名/微信号解析成 wx-mcp 可用的 username/talker. " +
+		Description: "把昵称/备注/alias/群名/微信号解析成 wechat-cli 可用的 username/talker. " +
 			"当 agent 只知道人名或群名时先调这个; 返回 candidates 按精确匹配和最近会话排序.",
 		InputSchema: jsonSchema(props{
 			"query":       strProp("要解析的人名/群名/微信号"),
@@ -106,7 +106,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "messages",
-		Description: "会话消息, 默认直接读取实时微信消息 DB, 不缓存聊天正文. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wx-mcp 用 metadata cache 自动解析. " +
+		Description: "会话消息, 默认直接读取实时微信消息 DB, 不缓存聊天正文. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wechat-cli 用 metadata cache 自动解析. " +
 			"view=agent 返回给 agent 直接消费的 query/freshness/messages envelope; query 含 returned/limit/offset/has_more/next_offset, 用于可靠分页爬全量. messages[] 是低噪声 timeline 行: id(local_id/server_id_str/talker) / time / create_time(unix秒) / time_iso / sender / sender_wxid / is_from_me / kind / text / warnings, " +
 			"并为非文本消息提供 display-ready 结构: images / videos / files / link / music / miniprogram / forward_chat / quote / transfer / red_packet / location / card / voice / video / sticker / solitaire / announcement / pat. " +
 			"默认遵循微信 UI 可见语义: 图片/视频/文件给 agent 可直接读取的本机 path, 语音默认优先用 faster-whisper large-v3 返回本地 ASR transcript, raw SILK、不可读 .dat、CDN/aeskey、协议码和 raw XML 下沉到 debug/full/media_resources; 引用消息会扁平到 quote 并复用原消息可见 payload; 合并转发 item 使用 source_id 统一关联原消息, 媒体无法解析时给明确 warnings; 链接直接给 title/url/source/thumb_url. " +
@@ -115,7 +115,7 @@ var toolDefs = []toolDef{
 			"/ id / display / display-ready 非文本结构 / warnings (群聊已剥 'wxid:\\n' 前缀). " +
 			"正常 agent 查询不需要 fields=full; 默认隐藏 media_resources/media_read_hints/CDN/aeskey/.dat 解码细节. 维护者诊断时才传 include_debug=true/debug=true 或 fields=full. 可传 include_media_paths=false 跳过媒体路径补齐. " +
 			"若消息 XML 或引用消息(refermsg)里的真实图片 md5 能匹配本机 temp 里的 PNG/JPG 副本, media_read_hints 会优先给 direct_readable_local_paths 供 agent 直接读图; 引用图片带 source=message_refermsg / message_role=referenced_message. " +
-			"图片 .dat 会 best-effort 解码到 ~/.wx-mcp/media-cache 并返回 decoded_media_local_paths / decoded_local_paths; 微信 V4 图片缺 image_key 或 image_key 失效时会先自动跑 wxkey image-key 刷新并重试, 仍失败才在 agent view 给 concise warning, debug/full 返回 decode_status=needs_image_key 和刷新诊断. " +
+			"图片 .dat 会 best-effort 解码到 ~/.wechat-cli/media-cache 并返回 decoded_media_local_paths / decoded_local_paths; 微信 V4 图片缺 image_key 或 image_key 失效时会先自动跑 wxkey image-key 刷新并重试, 仍失败才在 agent view 给 concise warning, debug/full 返回 decode_status=needs_image_key 和刷新诊断. " +
 			"fields=full 是调试兼容接口, 额外返回: subtype / message_content (raw 文本/XML) / " +
 			"message_content_parsed (图/表情/app/语音 XML 结构化, 引用递归 depth=5). " +
 			"forward_chat (subtype=19) 的 parsed 额外含 forward_items[] (每条: datatype/sourcename/sourcetime/datatitle/datadesc/datafmt/fullmd5/datasize/src_msg_localid); " +
@@ -173,7 +173,7 @@ var toolDefs = []toolDef{
 		Description: "消息附件/媒体资源定位. 读取 message_resource.db, 按 chat/talker/local_id/server_id/time/sender/type 过滤, " +
 			"默认返回 agent-ready 资源: images/videos/files[].path 和 resources[].path 只会是可直接读取的本机图片/视频/文件路径, resources 默认不暴露 resource_id/status/raw family/variant 等维护字段. " +
 			"不可读 .dat、重复候选 paths、local_path_details、raw type/variant_code、解码细节和候选路径默认隐藏; 维护者诊断时传 include_debug=true/debug=true 才返回. " +
-			"对图片会补查消息 XML 的真实图片 md5, 若本机 temp 存在同 md5 PNG/JPG 副本则优先返回真实 path. 图片 .dat 会 best-effort 解码到 ~/.wx-mcp/media-cache; 微信 V4 图片缺 image_key 或 image_key 失效时会自动跑 wxkey image-key 刷新并重试, 仍失败才给 concise warning, 不把 .dat 当图片路径给 agent. wx-mcp 不做图片识别. " +
+			"对图片会补查消息 XML 的真实图片 md5, 若本机 temp 存在同 md5 PNG/JPG 副本则优先返回真实 path. 图片 .dat 会 best-effort 解码到 ~/.wechat-cli/media-cache; 微信 V4 图片缺 image_key 或 image_key 失效时会自动跑 wxkey image-key 刷新并重试, 仍失败才给 concise warning, 不把 .dat 当图片路径给 agent. wechat-cli 不做图片识别. " +
 			"适合 agent 在 messages/search 拿到 local_id 或 server_id 后继续定位图片、视频、文件和转发记录里的资源. " +
 			"after/before 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
@@ -374,7 +374,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "cache_status",
-		Description: "查看 wx-mcp metadata snapshot cache 与统一 index.sqlite 诊断信息. 默认只缓存联系人/会话用于名称解析, 不缓存聊天正文, 不触发 wxkey setup; 不再输出 fresh=true 这种易误解的全局新鲜度结论.",
+		Description: "查看 wechat-cli metadata snapshot cache 与统一 index.sqlite 诊断信息. 默认只缓存联系人/会话用于名称解析, 不缓存聊天正文, 不触发 wxkey setup; 不再输出 fresh=true 这种易误解的全局新鲜度结论.",
 		InputSchema: jsonSchema(props{}, nil),
 	},
 	{
@@ -388,7 +388,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "cache_rebuild",
-		Description: "删除当前 wx-mcp cache 目录后完整重建 metadata snapshot cache + index.sqlite.",
+		Description: "删除当前 wechat-cli cache 目录后完整重建 metadata snapshot cache + index.sqlite.",
 		InputSchema: jsonSchema(props{}, nil),
 	},
 	{
@@ -402,7 +402,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "stats",
-		Description: "metadata cache 状态统计. wx-mcp 不缓存聊天正文, 因此只返回 sessions/contacts 计数和提示.",
+		Description: "metadata cache 状态统计. wechat-cli 不缓存聊天正文, 因此只返回 sessions/contacts 计数和提示.",
 		InputSchema: jsonSchema(props{}, nil),
 	},
 	{

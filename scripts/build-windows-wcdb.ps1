@@ -1,7 +1,7 @@
 param(
   [string]$WcdbVersion = "2.1.16",
   [string]$OutDir = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")).Path "lib"),
-  [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) "wx-mcp-wcdb-build"),
+  [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) "wechat-cli-wcdb-build"),
   [switch]$KeepWorkDir
 )
 

@@ -2,10 +2,10 @@ param(
   [switch]$DryRun,
   [switch]$Json,
   [switch]$Update,
-  [string]$Repo = $env:WX_MCP_REPO,
-  [string]$Tag = $env:WX_MCP_RELEASE_TAG,
-  [string]$Asset = $env:WX_MCP_RELEASE_ASSET,
-  [string]$InstallDir = $env:WX_MCP_INSTALL_DIR,
+  [string]$Repo = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_REPO)) { $env:WECHAT_CLI_REPO } else { $env:WX_MCP_REPO }),
+  [string]$Tag = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_RELEASE_TAG)) { $env:WECHAT_CLI_RELEASE_TAG } else { $env:WX_MCP_RELEASE_TAG }),
+  [string]$Asset = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_RELEASE_ASSET)) { $env:WECHAT_CLI_RELEASE_ASSET } else { $env:WX_MCP_RELEASE_ASSET }),
+  [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR }),
   [string]$McpClient = "",
   [switch]$Mcp,
   [switch]$NoMcp,
@@ -17,9 +17,9 @@ $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = "https://github.com/r266-tech/wechat-local-mcp" }
 if ([string]::IsNullOrWhiteSpace($Tag)) { $Tag = "latest" }
-if ([string]::IsNullOrWhiteSpace($Asset)) { $Asset = "wx-mcp-latest-windows-amd64.zip" }
-if ($env:WX_MCP_INSTALL_JSON -eq "1") { $Json = $true }
-if ($env:WX_MCP_KEEP_DOWNLOAD -eq "1") { $KeepDownload = $true }
+if ([string]::IsNullOrWhiteSpace($Asset)) { $Asset = "wechat-cli-latest-windows-amd64.zip" }
+if ($env:WECHAT_CLI_INSTALL_JSON -eq "1" -or $env:WX_MCP_INSTALL_JSON -eq "1") { $Json = $true }
+if ($env:WECHAT_CLI_KEEP_DOWNLOAD -eq "1" -or $env:WX_MCP_KEEP_DOWNLOAD -eq "1") { $KeepDownload = $true }
 
 function Write-Step([string]$Text) {
   if ($Json) {
@@ -90,7 +90,7 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 $slug = Get-RepoSlug $Repo
 $base = Get-RepoUrl $Repo
 $url = Get-AssetUrl $base $Tag $Asset
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("wx-mcp-install-" + [Guid]::NewGuid().ToString("N"))
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("wechat-cli-install-" + [Guid]::NewGuid().ToString("N"))
 $extract = Join-Path $tmp "extract"
 New-Item -ItemType Directory -Force -Path $extract | Out-Null
 
@@ -98,7 +98,7 @@ try {
   $zip = Join-Path $tmp $Asset
   $sha = Join-Path $tmp "$Asset.sha256"
 
-  Write-Step "Downloading wx-mcp release: $url"
+  Write-Step "Downloading wechat-cli release: $url"
   try {
     Save-Url $url $zip
   } catch {
@@ -109,7 +109,7 @@ try {
     }
     $url = $fallback
     $zip = Join-Path $tmp (Split-Path ([Uri]$fallback).AbsolutePath -Leaf)
-    Write-Step "Downloading wx-mcp release: $url"
+    Write-Step "Downloading wechat-cli release: $url"
     Save-Url $url $zip
   }
 

@@ -11,5 +11,5 @@ func SetupSupported() bool {
 }
 
 func UnsupportedSetupMessage() string {
-	return "Automatic key extraction is not implemented on this platform. Provide schema-2 keys in config.json or set WX_MCP_CONFIG to a ready config file."
+	return "Automatic key extraction is not implemented on this platform. Provide schema-2 keys in config.json or set WECHAT_CLI_CONFIG to a ready config file."
 }

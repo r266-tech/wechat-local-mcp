@@ -107,10 +107,7 @@ var (
 // findWCDB locates the platform WCDB dynamic library.
 func findWCDB() (string, error) {
 	var candidates []string
-	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_LIB")); p != "" {
-		candidates = append(candidates, p)
-	}
-	if p := strings.TrimSpace(os.Getenv("WX_MCP_WCDB_DYLIB")); p != "" {
+	if p := envFirst("WECHAT_CLI_WCDB_LIB", "WECHAT_CLI_WCDB_DYLIB", "WX_MCP_WCDB_LIB", "WX_MCP_WCDB_DYLIB"); p != "" {
 		candidates = append(candidates, p)
 	}
 	candidates = append(candidates, wcdbLibraryCandidates()...)
@@ -123,7 +120,7 @@ func findWCDB() (string, error) {
 }
 
 /*
-		return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wx-mcp 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WX_MCP_WCDB_DYLIB")
+		return "", fmt.Errorf("libWCDB.dylib 未找到。把它放在 wechat-cli 旁边 (./lib/libWCDB.dylib), ~/.config/wxcli/lib/, 或设置 WECHAT_CLI_WCDB_DYLIB")
 	}
 */
 func (s *server) ensure() error {
@@ -186,10 +183,10 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 		return fmt.Errorf("%s; wxkey setup was already attempted recently for this condition", reason)
 	}
 	s.keyRefreshLast[key] = time.Now()
-	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running wxkey key setup...\n", reason)
+	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey key setup...\n", appName, reason)
 	res, stderr, err := runWxkeySetup()
 	if err != nil {
-		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WX_MCP_DB_ROOT matches the logged-in account, then retry.", err, stderr)
+		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WECHAT_CLI_DB_ROOT matches the logged-in account, then retry.", err, stderr)
 	}
 	fresh, err := config.Load()
 	if err != nil {
@@ -200,14 +197,14 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	}
 	s.cfg = fresh
 	s.ok = true
-	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey setup OK — %d per-DB keys cached for wxid=%s\n",
+	fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d per-DB keys cached for wxid=%s\n", appName,
 		len(res.Keys), res.WxID)
 	return nil
 }
 
 func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
-	if strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")) != "" {
-		return fmt.Errorf("WX_MCP_IMAGE_KEY is set; not overriding explicit image_key env")
+	if envFirst("WECHAT_CLI_IMAGE_KEY", "WX_MCP_IMAGE_KEY") != "" {
+		return fmt.Errorf("WECHAT_CLI_IMAGE_KEY is set; not overriding explicit image_key env")
 	}
 	s.imageKeyRefreshMu.Lock()
 	defer s.imageKeyRefreshMu.Unlock()
@@ -231,7 +228,7 @@ func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
 		return fmt.Errorf("%s; wxkey image-key was already attempted recently", reason)
 	}
 	s.imageKeyRefreshLast = time.Now()
-	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running wxkey image-key setup...\n", reason)
+	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey image-key setup...\n", appName, reason)
 	img, stderr, err := runWxkeyImageKey(root)
 	if err != nil {
 		return fmt.Errorf("wxkey image-key failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache, keep WeChat logged in, open an image chat, then retry.", err, stderr)
@@ -250,7 +247,7 @@ func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
 	}
 	s.cfg = fresh
 	s.ok = fresh.Ready()
-	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey image-key OK — image_key cached\n")
+	fmt.Fprintf(os.Stderr, "[%s] wxkey image-key OK — image_key cached\n", appName)
 	return nil
 }
 
@@ -462,10 +459,10 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.5.5"},
+			"serverInfo":      map[string]any{"name": appName, "version": appVersion},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
-				"- wx-mcp automatically refreshes missing DB enc_keys and WeChat V4 image_key when the stored no-SIP wxkey credential is available; if a tool still returns warnings/errors, surface the exact reason and next action.\n" +
+				"- wechat-cli automatically refreshes missing DB enc_keys and WeChat V4 image_key when the stored no-SIP wxkey credential is available; if a tool still returns warnings/errors, surface the exact reason and next action.\n" +
 				"- Freshness check: `sessions limit=1`, compare `last_timestamp` to now. Stale by hours = WeChat likely not running.",
 		}}
 	case "tools/list":
@@ -3824,7 +3821,7 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 			}
 			if len(keys) == 0 {
 				meta["v4_key_source"] = "missing"
-				return nil, "", meta, "needs_image_key", fmt.Errorf("WeChat v4 image .dat requires image_key; wx-mcp could not refresh it automatically")
+				return nil, "", meta, "needs_image_key", fmt.Errorf("WeChat v4 image .dat requires image_key; wechat-cli could not refresh it automatically")
 			}
 		}
 	}
@@ -3837,7 +3834,7 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 		}
 		return decoded, ext, meta, "decoded", nil
 	}
-	if usesDynamicImageKey && strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")) == "" && s.refreshImageKeyForDecode(meta, "configured WeChat V4 image_key failed", true) {
+	if usesDynamicImageKey && envFirst("WECHAT_CLI_IMAGE_KEY", "WX_MCP_IMAGE_KEY") == "" && s.refreshImageKeyForDecode(meta, "configured WeChat V4 image_key failed", true) {
 		keys = s.imageKeyCandidates()
 		decoded, ext, source, lastErr = tryDecodeWechatV4WithImageKeys(data, xorKey, keys)
 		if lastErr == nil {
@@ -3980,7 +3977,7 @@ func (s *server) imageKeyCandidates() []imageKeyCandidate {
 		source string
 	}
 	var raws []rawKey
-	if raw := strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")); raw != "" {
+	if raw := envFirst("WECHAT_CLI_IMAGE_KEY", "WX_MCP_IMAGE_KEY"); raw != "" {
 		raws = append(raws, rawKey{value: raw, source: "env"})
 	}
 	if s != nil && s.cfg != nil {
@@ -4130,7 +4127,7 @@ func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string)
 }
 
 func (s *server) mediaDecodeCacheDir() (string, error) {
-	home, err := wxMCPHomeDir()
+	stateDir, err := appStateDir()
 	if err != nil {
 		return "", err
 	}
@@ -4142,7 +4139,7 @@ func (s *server) mediaDecodeCacheDir() (string, error) {
 			id = "root-" + hex.EncodeToString(sum[:8])
 		}
 	}
-	return filepath.Join(home, ".wx-mcp", "media-cache", safeCacheID(id)), nil
+	return filepath.Join(stateDir, "media-cache", safeCacheID(id)), nil
 }
 
 func imageExtForData(data []byte) string {
@@ -4570,7 +4567,7 @@ func (s *server) voiceAudioForASR(path string) (string, error) {
 func (s *server) decodeSILKVoiceToWAV(path string) (string, error) {
 	decoder := findSILKDecoder()
 	if decoder == "" {
-		return "", fmt.Errorf("SILK decoder not found; set WX_MCP_SILK_DECODER")
+		return "", fmt.Errorf("SILK decoder not found; set WECHAT_CLI_SILK_DECODER")
 	}
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	wavPath := base + ".wav"
@@ -4597,7 +4594,7 @@ func (s *server) decodeSILKVoiceToWAV(path string) (string, error) {
 }
 
 func findSILKDecoder() string {
-	if p := strings.TrimSpace(os.Getenv("WX_MCP_SILK_DECODER")); p != "" {
+	if p := envFirst("WECHAT_CLI_SILK_DECODER", "WX_MCP_SILK_DECODER"); p != "" {
 		return p
 	}
 	for _, name := range []string{"silk_v3_decoder", "silk_decoder", "silk-decoder"} {
@@ -4633,20 +4630,20 @@ func writePCM16LEMonoWAV(path string, pcm []byte, sampleRate int) error {
 }
 
 func runLocalVoiceASR(audioPath string) (text, engine, model string, err error) {
-	if cmd := strings.TrimSpace(os.Getenv("WX_MCP_VOICE_TRANSCRIBE_CMD")); cmd != "" {
+	if cmd := envFirst("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "WX_MCP_VOICE_TRANSCRIBE_CMD"); cmd != "" {
 		text, err = runConfiguredVoiceTranscriber(cmd, audioPath)
 		return text, "custom", "", err
 	}
 	if python := findFasterWhisperPython(); python != "" {
 		return runFasterWhisperVoiceASRWithPython(python, audioPath)
 	}
-	cli, err := exec.LookPath(firstNonEmpty(os.Getenv("WX_MCP_WHISPER_CLI"), "whisper-cli"))
+	cli, err := exec.LookPath(firstNonEmpty(envFirst("WECHAT_CLI_WHISPER_CLI", "WX_MCP_WHISPER_CLI"), "whisper-cli"))
 	if err != nil {
 		return "", "local_asr", "", fmt.Errorf("whisper-cli not found")
 	}
 	model = findWhisperModel()
 	if model == "" {
-		return "", "whisper.cpp", "", fmt.Errorf("whisper model not found; set WX_MCP_WHISPER_MODEL")
+		return "", "whisper.cpp", "", fmt.Errorf("whisper model not found; set WECHAT_CLI_WHISPER_MODEL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
@@ -4668,8 +4665,8 @@ func runFasterWhisperVoiceASR(audioPath string) (text, engine, model string, err
 }
 
 func runFasterWhisperVoiceASRWithPython(python, audioPath string) (text, engine, model string, err error) {
-	model = firstNonEmpty(os.Getenv("WX_MCP_FASTER_WHISPER_MODEL"), defaultFasterWhisperModel)
-	language := firstNonEmpty(os.Getenv("WX_MCP_FASTER_WHISPER_LANGUAGE"), os.Getenv("WX_MCP_VOICE_LANGUAGE"), "zh")
+	model = firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_MODEL", "WX_MCP_FASTER_WHISPER_MODEL"), defaultFasterWhisperModel)
+	language := firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_LANGUAGE", "WX_MCP_FASTER_WHISPER_LANGUAGE"), envFirst("WECHAT_CLI_VOICE_LANGUAGE", "WX_MCP_VOICE_LANGUAGE"), "zh")
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
 	out, err := exec.CommandContext(ctx, python, "-c", fasterWhisperPythonScript, audioPath, model, language).CombinedOutput()
@@ -4687,8 +4684,8 @@ from faster_whisper import WhisperModel
 audio_path = sys.argv[1]
 model_name = sys.argv[2]
 language = sys.argv[3] if len(sys.argv) > 3 else "zh"
-device = os.environ.get("WX_MCP_FASTER_WHISPER_DEVICE", "cpu")
-compute_type = os.environ.get("WX_MCP_FASTER_WHISPER_COMPUTE_TYPE", "int8")
+device = os.environ.get("WECHAT_CLI_FASTER_WHISPER_DEVICE") or os.environ.get("WX_MCP_FASTER_WHISPER_DEVICE", "cpu")
+compute_type = os.environ.get("WECHAT_CLI_FASTER_WHISPER_COMPUTE_TYPE") or os.environ.get("WX_MCP_FASTER_WHISPER_COMPUTE_TYPE", "int8")
 
 model = WhisperModel(model_name, device=device, compute_type=compute_type)
 kwargs = {"beam_size": 5, "vad_filter": True}
@@ -4700,7 +4697,7 @@ print("".join(segment.text for segment in segments).strip())
 
 func findFasterWhisperPython() string {
 	var candidates []string
-	if p := strings.TrimSpace(os.Getenv("WX_MCP_FASTER_WHISPER_PYTHON")); p != "" {
+	if p := envFirst("WECHAT_CLI_FASTER_WHISPER_PYTHON", "WX_MCP_FASTER_WHISPER_PYTHON"); p != "" {
 		candidates = append(candidates, p)
 	}
 	if home, _ := os.UserHomeDir(); home != "" {
@@ -4824,7 +4821,7 @@ func shellQuote(s string) string {
 }
 
 func findWhisperModel() string {
-	if p := strings.TrimSpace(os.Getenv("WX_MCP_WHISPER_MODEL")); p != "" {
+	if p := envFirst("WECHAT_CLI_WHISPER_MODEL", "WX_MCP_WHISPER_MODEL"); p != "" {
 		return p
 	}
 	home, _ := os.UserHomeDir()
@@ -4879,7 +4876,7 @@ func whisperModelRank(path string) int {
 }
 
 func voiceCommandTimeout() time.Duration {
-	if raw := strings.TrimSpace(os.Getenv("WX_MCP_VOICE_TIMEOUT_SECONDS")); raw != "" {
+	if raw := envFirst("WECHAT_CLI_VOICE_TIMEOUT_SECONDS", "WX_MCP_VOICE_TIMEOUT_SECONDS"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			return time.Duration(n) * time.Second
 		}
@@ -5344,7 +5341,7 @@ func (s *server) resolveLooseChatArg(a map[string]any) (string, error) {
 	}
 	db, err := s.openCacheIndex(false)
 	if err != nil {
-		return "", fmt.Errorf("chat %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw talker/wxid", raw)
+		return "", fmt.Errorf("chat %q requires cache index for display-name resolution; run `wechat-cli cache refresh` first or pass raw talker/wxid", raw)
 	}
 	defer db.Close()
 	return resolveTalkerForCache(db, map[string]any{"chat": raw}, true)
@@ -5357,7 +5354,7 @@ func (s *server) resolveLooseSenderArg(a map[string]any) (string, error) {
 	}
 	db, err := s.openCacheIndex(false)
 	if err != nil {
-		return "", fmt.Errorf("sender %q requires cache index for display-name resolution; run `wx-mcp cache refresh` first or pass raw sender wxid", raw)
+		return "", fmt.Errorf("sender %q requires cache index for display-name resolution; run `wechat-cli cache refresh` first or pass raw sender wxid", raw)
 	}
 	defer db.Close()
 	cands, err := resolveChatCandidates(db, raw, "", 1)
@@ -5714,7 +5711,7 @@ func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 			}
 			target = resolved
 		} else if errors.Is(err, errCacheMissing) {
-			return nil, fmt.Errorf("chat %q requires cache index for group-name resolution; run `wx-mcp cache refresh` first or pass raw chatroom_id", target)
+			return nil, fmt.Errorf("chat %q requires cache index for group-name resolution; run `wechat-cli cache refresh` first or pass raw chatroom_id", target)
 		} else {
 			return nil, err
 		}
@@ -6018,7 +6015,7 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 	like := "%" + kw + "%"
 
 	// search_mode is kept for compatibility, but all modes use WeChat's live
-	// FTS content DB. wx-mcp intentionally does not globally scan every Msg_*
+	// FTS content DB. wechat-cli intentionally does not globally scan every Msg_*
 	// table for substring search.
 	db, err := s.openDB("message", "message_fts.db")
 	if err != nil {
@@ -6382,7 +6379,7 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 	if talker == "" && getStr(a, "chat") != "" {
 		cdb, err := openCache()
 		if err != nil {
-			return nil, fmt.Errorf("chat filter requires cache index; run `wx-mcp cache refresh` first: %w", err)
+			return nil, fmt.Errorf("chat filter requires cache index; run `wechat-cli cache refresh` first: %w", err)
 		}
 		resolved, err := resolveTalkerForCache(cdb, a, true)
 		if err != nil {
@@ -6394,7 +6391,7 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 	if senderFilter != "" && !looksLikeRawChatID(senderFilter) {
 		cdb, err := openCache()
 		if err != nil {
-			return nil, fmt.Errorf("sender filter requires cache index; run `wx-mcp cache refresh` first: %w", err)
+			return nil, fmt.Errorf("sender filter requires cache index; run `wechat-cli cache refresh` first: %w", err)
 		}
 		cands, err := resolveChatCandidates(cdb, senderFilter, "", 1)
 		if err != nil {

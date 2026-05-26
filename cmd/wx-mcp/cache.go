@@ -76,7 +76,7 @@ func (s *server) activeConfigNoSetup() (*config.Config, error) {
 }
 
 func cachePathsFor(cfg *config.Config) (cachePaths, error) {
-	home, err := wxMCPHomeDir()
+	stateDir, err := appStateDir()
 	if err != nil {
 		return cachePaths{}, err
 	}
@@ -86,7 +86,7 @@ func cachePathsFor(cfg *config.Config) (cachePaths, error) {
 		id = "root-" + hex.EncodeToString(sum[:8])
 	}
 	id = safeCacheID(id)
-	root := filepath.Join(home, ".wx-mcp", "cache", id)
+	root := filepath.Join(stateDir, "cache", id)
 	return cachePaths{
 		RootDir:   root,
 		RawDir:    filepath.Join(root, "raw"),
@@ -140,7 +140,7 @@ func (s *server) openCacheIndex(writable bool) (*wcdb.DB, error) {
 }
 
 func (s *server) ensureCacheFresh(paths cachePaths) error {
-	if envBool("WX_MCP_DISABLE_AUTO_REFRESH") {
+	if envBoolAny("WECHAT_CLI_DISABLE_AUTO_REFRESH", "WX_MCP_DISABLE_AUTO_REFRESH") {
 		return nil
 	}
 	fresh, _, err := s.cacheFreshness(s.cfg, paths)
@@ -433,7 +433,7 @@ func spawnBackgroundCacheRefresh(force bool, lockPath string) (string, error) {
 		args = append(args, "--force")
 	}
 	cmd := exec.Command(exe, args...)
-	cmd.Env = append(os.Environ(), "WX_MCP_CACHE_LOCK_HELD="+lockPath)
+	cmd.Env = append(os.Environ(), "WECHAT_CLI_CACHE_LOCK_HELD="+lockPath, "WX_MCP_CACHE_LOCK_HELD="+lockPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	configureBackgroundCommand(cmd)
@@ -466,17 +466,16 @@ func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
 }
 
 func acquireCacheRefreshLock() (func(), bool, string, error) {
-	if held := os.Getenv("WX_MCP_CACHE_LOCK_HELD"); held != "" {
+	if held := envFirst("WECHAT_CLI_CACHE_LOCK_HELD", "WX_MCP_CACHE_LOCK_HELD"); held != "" {
 		if held == "1" {
 			return func() {}, true, "", nil
 		}
 		return func() { _ = os.Remove(held) }, true, held, nil
 	}
-	home, err := wxMCPHomeDir()
+	stateDir, err := appStateDir()
 	if err != nil {
 		return nil, false, "", err
 	}
-	stateDir := filepath.Join(home, ".wx-mcp")
 	lockDir := filepath.Join(stateDir, "cache-refresh.lock")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, false, lockDir, err
@@ -589,7 +588,7 @@ func cacheWorkerCount(total int) int {
 	if total <= 1 {
 		return 1
 	}
-	if raw := strings.TrimSpace(os.Getenv("WX_MCP_CACHE_WORKERS")); raw != "" {
+	if raw := envFirst("WECHAT_CLI_CACHE_WORKERS", "WX_MCP_CACHE_WORKERS"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil {
 			if n < 1 {
 				return 1
@@ -1096,7 +1095,7 @@ func (s *server) toolStats(a map[string]any) (any, error) {
 	return map[string]any{
 		"sessions": countTable(db, "sessions_unified"),
 		"contacts": countTable(db, "contacts_unified"),
-		"note":     "wx-mcp only caches metadata; use messages/search for live chat-history reads",
+		"note":     "wechat-cli only caches metadata; use messages/search for live chat-history reads",
 	}, nil
 }
 
@@ -1110,7 +1109,7 @@ func (s *server) toolExportMessages(a map[string]any) (any, error) {
 		format = "jsonl"
 	}
 	if firstNonEmpty(getStr(a, "talker"), getStr(a, "chat")) == "" {
-		return nil, fmt.Errorf("export_messages requires chat or talker; wx-mcp does not keep a global message cache")
+		return nil, fmt.Errorf("export_messages requires chat or talker; wechat-cli does not keep a global message cache")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
@@ -1143,7 +1142,7 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format string) 
 	case "jsonl":
 	case "markdown":
 	case "html":
-		_, _ = w.WriteString("<!doctype html><meta charset=\"utf-8\"><title>wx-mcp export</title><body>")
+		_, _ = w.WriteString("<!doctype html><meta charset=\"utf-8\"><title>wechat-cli export</title><body>")
 	default:
 		return 0, fmt.Errorf("invalid format=%q: jsonl / markdown / html", format)
 	}
@@ -1251,7 +1250,7 @@ func renderMessageMarkdown(r wcdb.Row) string {
 
 func renderMessagesHTML(rows []wcdb.Row) string {
 	var b strings.Builder
-	b.WriteString("<!doctype html><meta charset=\"utf-8\"><title>wx-mcp export</title><body>")
+	b.WriteString("<!doctype html><meta charset=\"utf-8\"><title>wechat-cli export</title><body>")
 	for _, r := range rows {
 		b.WriteString(renderMessageHTMLSection(r))
 	}

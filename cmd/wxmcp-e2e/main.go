@@ -1,5 +1,5 @@
 // Standalone test: open every WeChat DB using only the new schema-2 keys map
-// from ~/.config/wxcli/config.json + wx-mcp's wcdb package. Proves the
+// from ~/.config/wxcli/config.json + wechat-cli's wcdb package. Proves the
 // self-contained decrypt path actually works end-to-end.
 package main
 
@@ -37,7 +37,7 @@ func main() {
 		fail("schema-2 keys map is empty")
 	}
 
-	// libWCDB.dylib path: same resolution as wx-mcp main.go (repo-bundled lib/).
+	// libWCDB.dylib path: same resolution as wechat-cli main.go (repo-bundled lib/).
 	wcdbPath := "lib/libWCDB.dylib"
 	if home, err := os.UserHomeDir(); err == nil {
 		if _, err := os.Stat(wcdbPath); err != nil {

@@ -7,5 +7,5 @@ func wcdbLibraryCandidates() []string {
 }
 
 func wcdbLibraryMissingMessage() string {
-	return "WCDB dynamic library autodetection is not supported on this platform; set WX_MCP_WCDB_LIB"
+	return "WCDB dynamic library autodetection is not supported on this platform; set WECHAT_CLI_WCDB_LIB"
 }
