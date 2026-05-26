@@ -4749,6 +4749,9 @@ func runShellCommandOutput(ctx context.Context, command string) ([]byte, error) 
 		if shell == "" {
 			shell = "cmd.exe"
 		}
+		if strings.HasPrefix(strings.TrimSpace(command), `"`) {
+			command = `"` + command + `"`
+		}
 		return exec.CommandContext(ctx, shell, "/C", command).Output()
 	}
 	return exec.CommandContext(ctx, "/bin/sh", "-c", command).Output()
