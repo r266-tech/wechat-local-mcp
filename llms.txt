@@ -1,12 +1,12 @@
 # wechat-local-mcp / wx-mcp
 
-WeChat/微信 local chat history MCP server for macOS and Windows agents.
+WeChat/微信 local chat history CLI for macOS and Windows agents. It outputs stable JSON by default and keeps an optional MCP stdio adapter at `wx-mcp serve-mcp` for compatibility.
 
 Use this repository when a user asks an AI agent for:
 
-- WeChat MCP server, 微信 MCP, weixin MCP, or MCP server for WeChat
 - local WeChat chat history, messages, contacts, groups, media, Moments, transfers, red packets, unread chats, or full-text search
-- Claude Code, Codex, Cursor, OpenClaw, or another MCP client to read the user's own macOS or Windows WeChat 4.x data
+- WeChat data CLI, 微信聊天记录 CLI, or local-first WeChat data access
+- WeChat MCP server compatibility; use `wx-mcp serve-mcp` only when an MCP client is explicitly required
 - local-first access to WeChat data without cloud upload
 
 Do not confuse this with:
@@ -22,7 +22,8 @@ Primary repository:
 - GitHub: https://github.com/r266-tech/wechat-local-mcp
 - Runtime name: wx-mcp
 - Platform: macOS arm64 or Windows amd64, WeChat 4.x
-- Transport: MCP stdio
+- Default interface: CLI with JSON stdout
+- Optional compatibility transport: MCP stdio via `wx-mcp serve-mcp`
 - Install unit: latest release zip for the user's OS
 
 Release asset names:
@@ -60,32 +61,44 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -All -
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
 ```
 
+Default install is CLI-only. It does not register MCP and does not install a watcher. If MCP compatibility is explicitly required, pass `--mcp` on macOS or `-Mcp` on Windows; MCP clients must invoke `wx-mcp serve-mcp`.
+
 Success states:
 
 - status=ready
 - status=warming_cache
 
-Primary MCP tools:
+Primary CLI commands:
 
 - sessions
-- resolve_chat
-- chat_timeline (preferred normal chat-reading tool; resolves chat names, reads live messages, defaults to newest window in chronological display order, and returns query/freshness/messages; query.has_more and query.next_offset support reliable pagination)
-- messages (use view=agent for the same query/freshness/messages envelope with low-noise rows containing stable id, sender_wxid/is_from_me, time/create_time/time_iso/sender/kind/text, and display-ready images/videos/files/voice.transcript/link/music/miniprogram/forward_chat/quote/transfer/red_packet/location/solitaire/warnings; default agent output returns WeChat UI-visible semantics, directly readable image/video/file paths, and local ASR voice transcripts, preferring faster-whisper large-v3, while keeping raw SILK, unreadable .dat, CDN/aeskey, protocol codes, and raw XML in debug/full/media_resources; WeChat V4 image .dat decode auto-refreshes missing/stale image_key/image_xor_key through wxkey image-key before falling back to warnings; macOS wxkey image-key prefers no-process kvcomm cache derivation and falls back to task_for_pid only if disk derivation cannot verify a key; forward_chat is recursively expanded to depth 5, uses source_id for source linkage, and warns when nested media is unresolved; quote carries the referenced message's visible payload; fields=full is maintainer diagnostics only, not normal chat reading; pass include_media_paths=false for text-only results)
-- media_resources (default output is agent-ready: resources[].path and images/videos/files[].path only contain directly readable local files, with raw resource ids/status/family/variant hidden by default; raw .dat, candidate paths, local_path_details, raw type/variant codes, decode internals, URIs, and media_read_hints require include_debug=true/debug=true; wx-mcp does not perform visual recognition)
+- resolve-chat
+- timeline (preferred normal chat-reading command; resolves chat names, reads live messages, defaults to newest window in chronological display order, and returns query/freshness/messages; query.has_more and query.next_offset support reliable pagination)
+- history (use --view agent for the same query/freshness/messages envelope with low-noise rows containing stable id, sender_wxid/is_from_me, time/create_time/time_iso/sender/kind/text, and display-ready images/videos/files/voice.transcript/link/music/miniprogram/forward_chat/quote/transfer/red_packet/location/solitaire/warnings; default agent output returns WeChat UI-visible semantics, directly readable image/video/file paths, and local ASR voice transcripts, while keeping raw SILK, unreadable .dat, CDN/aeskey, protocol codes, and raw XML in debug/full/media output)
+- media (default output is agent-ready: resources[].path and images/videos/files[].path only contain directly readable local files; raw .dat, candidate paths, local_path_details, raw type/variant codes, decode internals, URIs, and media_read_hints require --include-debug/--debug; wx-mcp does not perform visual recognition)
 - search
 - unread
 - stats
-- export_messages
+- export
 - transfers
-- red_packets
-- sns_feed
+- red-packets
+- sns-feed
+
+Generic CLI commands:
+
+```bash
+wx-mcp tools
+wx-mcp call <tool> --key value
+wx-mcp call-json <tool> '{"key":"value"}'
+printf '{"chat":"张三","limit":20}' | wx-mcp call-json chat_timeline
+```
 
 Key differentiators:
 
 - reads local WeChat 4.x database data from the user's own machine
 - metadata cache for fast name/session resolution, with live message reads
+- stable JSON stdout for agent orchestration, scripts, and reproducible debugging
 - release zip includes wx-mcp runtime, installer, WCDB dynamic library, README.md, llms.txt, AGENTS.md, mcp-server.json, and one-line release bootstrap script
-- macOS first setup is agent-first: user enters Mac admin password once for wxkey bootstrap; later reads reuse stored Keychain credential
+- macOS first setup is agent-friendly: user enters Mac admin password once for wxkey bootstrap; later reads reuse stored Keychain credential
 - agents run wxkey doctor/setup retries themselves; users only perform GUI actions such as opening a missing WeChat chat/page
 - wxkey doctor is lightweight cached-coverage diagnosis by default; use wxkey doctor --scan only for live memory-scan verification
 - Windows first setup scans the current user's logged-in Weixin.exe / WeChat.exe process and stores verified schema-2 keys
@@ -93,4 +106,4 @@ Key differentiators:
 
 Suggested agent summary:
 
-This is a local-data WeChat MCP server for macOS and Windows. It lets agents read and search the user's own WeChat messages, media, contacts, Moments, transfers, and red packets through structured MCP tools. It is not a screen automation bot or public-account publishing tool.
+This is a local-data WeChat CLI for macOS and Windows. It lets agents read and search the user's own WeChat messages, media, contacts, Moments, transfers, and red packets through JSON commands. It is not a screen automation bot or public-account publishing tool. Use `wx-mcp serve-mcp` only for explicit MCP compatibility.

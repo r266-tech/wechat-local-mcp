@@ -1,14 +1,16 @@
 {
   "name": "wx-mcp",
-  "version": "1.5.3",
-  "description": "Agent-first MCP server for local WeChat 4.x data on macOS and Windows, with chat_timeline query/freshness envelopes and structured display-ready message rows.",
+  "version": "1.5.5",
+  "description": "CLI-first local WeChat 4.x data reader for macOS and Windows, with an optional legacy MCP stdio adapter.",
   "homepage": "https://github.com/r266-tech/wechat-local-mcp",
   "license": "MIT",
   "platforms": ["darwin-arm64", "windows-amd64"],
   "transport": {
     "type": "stdio",
     "command": "./wx-mcp",
-    "windowsCommand": ".\\wx-mcp.exe"
+    "args": ["serve-mcp"],
+    "windowsCommand": ".\\wx-mcp.exe",
+    "windowsArgs": ["serve-mcp"]
   },
   "installer": {
     "oneLineMacOS": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh",

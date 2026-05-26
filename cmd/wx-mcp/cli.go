@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -10,11 +11,24 @@ import (
 
 func maybeRunCLI(args []string) bool {
 	if len(args) == 0 {
-		return false
+		printCLIUsageTo(os.Stdout)
+		return true
 	}
 	switch args[0] {
 	case "-h", "--help", "help":
-		printCLIUsage()
+		printCLIUsageTo(os.Stdout)
+		return true
+	case "serve-mcp", "mcp-server", "mcp", "serve":
+		runMCPServer()
+		return true
+	case "tools", "list-tools", "list_tools":
+		runToolsCLI()
+		return true
+	case "call":
+		runGenericToolCLI(args[1:])
+		return true
+	case "call-json", "call_json":
+		runToolJSONCLI(args[1:])
 		return true
 	case "cache":
 		runCacheCLI(args[1:])
@@ -106,9 +120,67 @@ func maybeRunCLI(args []string) bool {
 	case "sns-notifications", "sns_notifications":
 		runToolCLI("sns_notifications", parseKVFlags(args[1:]))
 		return true
+	case "sql":
+		flags := parseKVFlags(args[1:])
+		if q := firstPositional(args[1:]); q != "" && flags["query"] == nil {
+			flags["query"] = q
+		}
+		runToolCLI("sql", flags)
+		return true
+	case "schema":
+		runToolCLI("schema", parseKVFlags(args[1:]))
+		return true
+	case "announcements", "chatroom-announcements", "chatroom_announcements":
+		flags := parseKVFlags(args[1:])
+		if chat := firstPositional(args[1:]); chat != "" && flags["chatroom_id"] == nil {
+			flags["chatroom_id"] = chat
+		}
+		runToolCLI("chatroom_announcements", flags)
+		return true
+	case "forward-history", "forward_history":
+		runToolCLI("forward_history", parseKVFlags(args[1:]))
+		return true
 	default:
 		return false
 	}
+}
+
+func runToolsCLI() {
+	writeJSONCLI(listedToolDefs())
+}
+
+func runGenericToolCLI(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: wx-mcp call <tool> [--key value ...]")
+		os.Exit(2)
+	}
+	runToolCLI(args[0], parseKVFlags(args[1:]))
+}
+
+func runToolJSONCLI(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: wx-mcp call-json <tool> '<json args>'")
+		os.Exit(2)
+	}
+	raw := ""
+	if len(args) > 1 {
+		raw = args[1]
+	} else {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		raw = string(data)
+	}
+	flags := map[string]any{}
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &flags); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid json args: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	runToolCLI(args[0], flags)
 }
 
 func runCacheCLI(args []string) {
@@ -178,6 +250,16 @@ func runToolCLI(name string, flags map[string]any) {
 		result, err = srv.toolSnsSearch(flags)
 	case "sns_notifications":
 		result, err = srv.toolSnsNotifications(flags)
+	case "sns":
+		result, err = srv.toolSns(flags)
+	case "sql":
+		result, err = srv.toolSQL(flags)
+	case "schema":
+		result, err = srv.toolSchema(flags)
+	case "chatroom_announcements":
+		result, err = srv.toolChatroomAnnouncements(flags)
+	case "forward_history":
+		result, err = srv.toolForwardHistory(flags)
 	default:
 		err = fmt.Errorf("unknown cli tool %q", name)
 	}
@@ -185,9 +267,43 @@ func runToolCLI(name string, flags map[string]any) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	writeJSONCLI(result)
+}
+
+func cliToolNames() []string {
+	return []string{
+		"resolve_chat",
+		"sessions",
+		"contacts",
+		"cache_status",
+		"cache_refresh",
+		"cache_rebuild",
+		"stats",
+		"unread",
+		"export_messages",
+		"search",
+		"messages",
+		"chat_timeline",
+		"media_resources",
+		"group_members",
+		"favorites",
+		"red_packets",
+		"transfers",
+		"sns",
+		"sns_feed",
+		"sns_search",
+		"sns_notifications",
+		"sql",
+		"schema",
+		"chatroom_announcements",
+		"forward_history",
+	}
+}
+
+func writeJSONCLI(v any) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(result)
+	_ = enc.Encode(v)
 }
 
 func parseKVFlags(args []string) map[string]any {
@@ -201,11 +317,15 @@ func parseKVFlags(args []string) map[string]any {
 		key, val, hasEq := strings.Cut(a, "=")
 		key = strings.ReplaceAll(key, "-", "_")
 		if !hasEq {
-			if key == "force" {
-				out[key] = true
-				continue
-			}
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+			if isBoolCLIFlag(key) {
+				if i+1 < len(args) && isBoolLiteral(args[i+1]) {
+					val = args[i+1]
+					i++
+				} else {
+					out[key] = true
+					continue
+				}
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
 				val = args[i+1]
 				i++
 			} else {
@@ -234,11 +354,27 @@ func parseKVFlags(args []string) map[string]any {
 	return out
 }
 
+func isBoolCLIFlag(key string) bool {
+	switch key {
+	case "background", "debug", "force", "friends_only", "groups_only", "include_debug", "include_images", "include_local_paths", "include_media_paths", "include_read", "stats":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBoolLiteral(s string) bool {
+	return s == "true" || s == "false"
+}
+
 func firstPositional(args []string) string {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "--") {
-			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+			key := strings.TrimPrefix(a, "--")
+			key, _, _ = strings.Cut(key, "=")
+			key = strings.ReplaceAll(key, "-", "_")
+			if !strings.Contains(a, "=") && !isBoolCLIFlag(key) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
 				i++
 			}
 			continue
@@ -249,10 +385,18 @@ func firstPositional(args []string) string {
 }
 
 func printCLIUsage() {
-	fmt.Fprint(os.Stderr, `wx-mcp - MCP server plus cache companion CLI
+	printCLIUsageTo(os.Stderr)
+}
 
-MCP mode:
-  wx-mcp
+func printCLIUsageTo(w io.Writer) {
+	fmt.Fprint(w, `wx-mcp - local WeChat data CLI
+
+General:
+  wx-mcp --help
+  wx-mcp tools
+  wx-mcp call <tool> [--key value ...]
+  wx-mcp call-json <tool> '{"key":"value"}'
+  wx-mcp serve-mcp                         # optional legacy MCP stdio adapter
 
 Cache CLI:
   wx-mcp cache status
@@ -276,6 +420,10 @@ Query/export CLI:
   wx-mcp sns-feed [--limit 20]
   wx-mcp sns-search "关键词"
   wx-mcp sns-notifications [--include-read]
+  wx-mcp schema [--subdir session] [--file session.db]
+  wx-mcp sql "select count(*) from Session"
+  wx-mcp announcements [--limit 20]
+  wx-mcp forward-history [--limit 20]
   wx-mcp export "张三" --path /tmp/messages.jsonl [--format jsonl|markdown|html]
 `)
 }

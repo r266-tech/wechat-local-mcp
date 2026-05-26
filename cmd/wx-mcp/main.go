@@ -424,13 +424,16 @@ func closeMsgDBs(shards []msgShardDB) {
 // ──────────────────── main loop ────────────────────
 
 func main() {
-	if len(os.Args) > 1 {
-		if maybeRunCLI(os.Args[1:]) {
-			return
-		}
-		printCLIUsage()
-		os.Exit(2)
+	if maybeRunCLI(os.Args[1:]) {
+		return
 	}
+	if len(os.Args) > 0 {
+		printCLIUsage()
+	}
+	os.Exit(2)
+}
+
+func runMCPServer() {
 	srv := &server{}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 4*1024*1024), 4*1024*1024)
@@ -459,7 +462,7 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.5.3"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.5.5"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
 				"- wx-mcp automatically refreshes missing DB enc_keys and WeChat V4 image_key when the stored no-SIP wxkey credential is available; if a tool still returns warnings/errors, surface the exact reason and next action.\n" +

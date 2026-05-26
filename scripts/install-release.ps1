@@ -7,6 +7,7 @@ param(
   [string]$Asset = $env:WX_MCP_RELEASE_ASSET,
   [string]$InstallDir = $env:WX_MCP_INSTALL_DIR,
   [string]$McpClient = "",
+  [switch]$Mcp,
   [switch]$NoMcp,
   [switch]$BackgroundRefresh,
   [switch]$KeepDownload
@@ -141,6 +142,7 @@ try {
   if (-not [string]::IsNullOrWhiteSpace($McpClient)) {
     $installerArgs += @("-McpClient", $McpClient)
   }
+  if ($Mcp) { $installerArgs += "-Mcp" }
   if ($NoMcp) { $installerArgs += "-NoMcp" }
   if ($BackgroundRefresh) { $installerArgs += "-BackgroundRefresh" }
 

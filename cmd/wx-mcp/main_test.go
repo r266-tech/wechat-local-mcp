@@ -92,6 +92,46 @@ func TestSenderPrefixRe(t *testing.T) {
 	}
 }
 
+func TestCLIHelpIsDefaultAndMCPIsExplicit(t *testing.T) {
+	if !maybeRunCLI(nil) {
+		t.Fatal("empty args should be handled by CLI help")
+	}
+	if !maybeRunCLI([]string{"help"}) {
+		t.Fatal("help should be handled by CLI")
+	}
+}
+
+func TestCLIToolCoverage(t *testing.T) {
+	missing := map[string]bool{}
+	for _, td := range toolDefs {
+		missing[td.Name] = true
+	}
+	for _, name := range cliToolNames() {
+		delete(missing, name)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("CLI does not cover tools: %#v", missing)
+	}
+}
+
+func TestParseKVFlags(t *testing.T) {
+	got := parseKVFlags([]string{"--chat", "某群", "--limit=20", "--include-debug", "--server-id-str", "9223372036854775808"})
+	if got["chat"] != "某群" || got["limit"] != int64(20) || got["include_debug"] != true || got["server_id_str"] != "9223372036854775808" {
+		t.Fatalf("parseKVFlags = %#v", got)
+	}
+}
+
+func TestBoolKVFlagsDoNotConsumePositionals(t *testing.T) {
+	args := []string{"--include-debug", "某群"}
+	got := parseKVFlags(args)
+	if got["include_debug"] != true {
+		t.Fatalf("include_debug = %#v, want true", got["include_debug"])
+	}
+	if pos := firstPositional(args); pos != "某群" {
+		t.Fatalf("firstPositional = %q, want 某群", pos)
+	}
+}
+
 func TestContentSummary_Text(t *testing.T) {
 	got := contentSummary(1, 0, "wxid_x:\nhello world", nil)
 	if got != "hello world" {

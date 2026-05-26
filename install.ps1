@@ -10,8 +10,9 @@ param(
   [switch]$Refresh,
   [switch]$BackgroundRefresh,
   [switch]$Doctor,
+  [switch]$Mcp,
   [switch]$NoMcp,
-  [string]$McpClient = "auto",
+  [string]$McpClient = "none",
   [string]$InstallDir = $env:WX_MCP_INSTALL_DIR
 )
 
@@ -39,6 +40,8 @@ $logDir = Join-Path $InstallDir "logs"
 $log = Join-Path $logDir "install.log"
 $refreshRan = $false
 $purgeState = [bool]($PurgeState -or $ClearState)
+$registerMcp = $false
+$mcpOptionSeen = [bool]($Mcp -or $NoMcp -or $PSBoundParameters.ContainsKey("McpClient"))
 
 function Add-Action([string]$s) { $actions.Add($s) | Out-Null }
 function Add-Warning([string]$s) { $warnings.Add($s) | Out-Null }
@@ -65,7 +68,7 @@ function Write-HumanResult($Out) {
   }
   if ($Out.mcp_registered_clients.Count -gt 0) {
     Write-Host "  mcp_registered: $($Out.mcp_registered_clients -join ', ')"
-  } elseif (-not $NoMcp -and $McpClient -ne "none") {
+  } elseif ($script:registerMcp -and $McpClient -ne "none") {
     Write-Host "  mcp_registered: no supported client command found"
   }
   if ($Out.refresh_ran) {
@@ -85,7 +88,8 @@ function Write-HumanResult($Out) {
   }
   if ($Out.errors.Count -eq 0 -and -not $DryRun -and $Out.mode -in @("install", "update")) {
     Write-Host ""
-    Write-Host "Next: open Claude/Codex and call the wx-mcp sessions tool to verify end-to-end access."
+    $exe = Join-Path $Out.install_dir "wx-mcp.exe"
+    Write-Host "Next: run $exe sessions to verify end-to-end access."
   }
 }
 function Finish {
@@ -101,6 +105,7 @@ function Finish {
     log = $log
     dry_run = [bool]$DryRun
     purge_state = [bool]$script:purgeState
+    mcp_client = $McpClient
     mcp_registered = ($registered.Count -gt 0)
     mcp_registered_clients = @($registered)
     refresh_ran = [bool]$script:refreshRan
@@ -187,17 +192,17 @@ function Copy-InstallDocs {
 }
 
 function Register-Mcp {
-  if ($NoMcp -or $McpClient -eq "none") { return }
+  if (-not $script:registerMcp -or $NoMcp -or $McpClient -eq "none") { return }
   $exe = Join-Path $InstallDir "wx-mcp.exe"
   $found = $false
   if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
-    Add-Action "register Codex MCP server wx-mcp"
+    Add-Action "register Codex MCP server wx-mcp at $exe serve-mcp"
     if ($DryRun) {
       $found = $true
     } else {
     try {
       & codex mcp remove wx-mcp *> $null
-      & codex mcp add wx-mcp -- $exe *> $null
+      & codex mcp add wx-mcp -- $exe serve-mcp *> $null
       $registered.Add("codex") | Out-Null
       $found = $true
     } catch {
@@ -206,13 +211,13 @@ function Register-Mcp {
     }
   }
   if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
-    Add-Action "register Claude MCP server wx-mcp"
+    Add-Action "register Claude MCP server wx-mcp at $exe serve-mcp"
     if ($DryRun) {
       $found = $true
     } else {
     try {
       & claude mcp remove -s user wx-mcp *> $null
-      & claude mcp add -s user wx-mcp $exe *> $null
+      & claude mcp add -s user wx-mcp $exe serve-mcp *> $null
       $registered.Add("claude") | Out-Null
       $found = $true
     } catch {
@@ -412,6 +417,24 @@ try {
   elseif ($ClearState) { $mode = "clear-state" }
   elseif ($Uninstall) { $mode = "uninstall" }
   elseif ($Update) { $mode = "update" }
+
+  if ($Mcp) {
+    $registerMcp = $true
+    if ($McpClient -eq "none") { $McpClient = "auto" }
+  } elseif ($McpClient -ne "none") {
+    $registerMcp = $true
+  }
+  if ($NoMcp) {
+    $registerMcp = $false
+    $McpClient = "none"
+  }
+  if ($Uninstall -and -not $mcpOptionSeen) {
+    $registerMcp = $true
+    $McpClient = "auto"
+  }
+  if ($McpClient -notin @("auto", "claude", "codex", "none")) {
+    throw "-McpClient must be auto, claude, codex, or none"
+  }
 
   if ($PurgeState -and -not ($Uninstall -or $ClearState)) {
     throw "-PurgeState is only valid with -Uninstall; use -ClearState to remove state without uninstalling"

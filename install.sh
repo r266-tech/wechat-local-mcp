@@ -11,7 +11,7 @@ INSTALL_LOG="$LOG_DIR/install.log"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
 WATCHER_INTERVAL=300
-MCP_CLIENT="auto"
+MCP_CLIENT="none"
 MCP_SCOPE="user"
 
 JSON=0
@@ -21,7 +21,8 @@ MODE="install"
 DO_BOOTSTRAP=0
 DO_REFRESH=0
 DO_WATCHER=0
-REGISTER_MCP=1
+REGISTER_MCP=0
+MCP_OPTION_SEEN=0
 PURGE_STATE=0
 
 WXMCP_MODE=""
@@ -56,8 +57,8 @@ Usage:
   ./install.sh --clear-state --yes [--json]
 
 Install options:
-  --all                     Install, register MCP, run wxkey bootstrap,
-                            and refresh metadata cache (does NOT install watcher;
+  --all                     Install CLI, run wxkey bootstrap, and refresh
+                            metadata cache (does NOT register MCP or install watcher;
                             add --watcher explicitly if you want periodic
                             background refresh — see README on TCC trade-off).
   --update                  Update an existing git checkout with
@@ -73,7 +74,8 @@ Install options:
                             triggers a "wx-mcp wants to access another app's
                             data" TCC prompt unless wx-mcp has Full Disk Access
                             granted in System Settings → Privacy & Security.
-  --no-mcp                  Do not register MCP.
+  --mcp                     Register the optional legacy MCP adapter.
+  --no-mcp                  Do not register MCP (default).
   --mcp-client auto|claude|codex|none
   --install-dir PATH        Default: ~/.local/share/wx-mcp
   --watcher-interval SEC    Default: 300.
@@ -81,12 +83,12 @@ Install options:
   --json                    Emit a single JSON result to stdout.
   --dry-run                 Report planned actions without writing.
   --doctor                  Check local install prerequisites/status.
-  --uninstall               Remove installed files, watcher plist, and MCP entry.
+  --uninstall               Remove installed files, watcher plist, and optional legacy MCP entries.
   --purge-state             With --uninstall, also remove wx-mcp state:
                             ~/.config/wxcli/config.json, ~/.wx-mcp, logs,
                             and the wxkey Keychain sudo credential.
   --clear-state             Only remove wx-mcp state; keep installed binaries
-                            and MCP registration.
+                            and optional MCP entries.
 
 Environment:
   WX_MCP_INSTALL_DIR        Override install directory.
@@ -199,7 +201,7 @@ print_human_result() {
   fi
   if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
     print
-    print "Next: open Claude/Codex and call the wx-mcp sessions tool to verify end-to-end access."
+    print "Next: run $INSTALL_DIR/wx-mcp sessions to verify end-to-end access."
     print "macOS quiet mode: add $INSTALL_DIR/wx-mcp and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
   fi
 }
@@ -321,18 +323,21 @@ parse_args() {
         ;;
       --update)
         MODE="update"
-        REGISTER_MCP=0
-        MCP_CLIENT="none"
         shift
         ;;
       --all)
         DO_BOOTSTRAP=1
         DO_REFRESH=1
-        REGISTER_MCP=1
         # watcher intentionally NOT in --all: on macOS 15+ the periodic
         # cross-container access triggers TCC re-prompts ("wx-mcp 想访问其他
         # App 的数据") repeatedly for ad-hoc signed binaries. Users who
         # actually want background metadata cache refresh can pass --watcher.
+        shift
+        ;;
+      --mcp)
+        MCP_OPTION_SEEN=1
+        REGISTER_MCP=1
+        MCP_CLIENT="auto"
         shift
         ;;
       --bootstrap)
@@ -360,17 +365,22 @@ parse_args() {
         shift
         ;;
       --no-mcp)
+        MCP_OPTION_SEEN=1
         REGISTER_MCP=0
         MCP_CLIENT="none"
         shift
         ;;
       --mcp-client)
         [[ "$#" -ge 2 ]] || die "--mcp-client requires a value" 2
+        MCP_OPTION_SEEN=1
         MCP_CLIENT="$2"
+        [[ "$MCP_CLIENT" == "none" ]] && REGISTER_MCP=0 || REGISTER_MCP=1
         shift 2
         ;;
       --mcp-client=*)
+        MCP_OPTION_SEEN=1
         MCP_CLIENT="${1#*=}"
+        [[ "$MCP_CLIENT" == "none" ]] && REGISTER_MCP=0 || REGISTER_MCP=1
         shift
         ;;
       --install-dir)
@@ -403,6 +413,14 @@ parse_args() {
   esac
   if [[ "$PURGE_STATE" -eq 1 && "$MODE" != "uninstall" && "$MODE" != "clear-state" ]]; then
     die "--purge-state is only valid with --uninstall; use --clear-state to remove state without uninstalling" 2
+  fi
+  if [[ "$MODE" == "clear-state" ]]; then
+    REGISTER_MCP=0
+    MCP_CLIENT="none"
+  fi
+  if [[ "$MODE" == "uninstall" && "$MCP_OPTION_SEEN" -eq 0 ]]; then
+    REGISTER_MCP=1
+    MCP_CLIENT="auto"
   fi
   [[ "$WATCHER_INTERVAL" == <-> ]] || die "--watcher-interval must be an integer" 2
   if [[ "$WATCHER_INTERVAL" -lt 60 ]]; then
@@ -566,13 +584,13 @@ register_claude_mcp() {
   if ! have_cmd claude; then
     die "claude command not found; use --mcp-client none or install Claude Code" 1
   fi
-  ACTIONS+=("register Claude MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp")
+  ACTIONS+=("register Claude MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp serve-mcp")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
 
   run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
-  run_logged claude mcp add -s "$MCP_SCOPE" "$MCP_NAME" "$INSTALL_DIR/wx-mcp" || die "Claude MCP registration failed; see $INSTALL_LOG" 1
+  run_logged claude mcp add -s "$MCP_SCOPE" "$MCP_NAME" "$INSTALL_DIR/wx-mcp" serve-mcp || die "Claude MCP registration failed; see $INSTALL_LOG" 1
   MCP_REGISTERED=1
   MCP_REGISTERED_CLIENTS+=("claude")
 }
@@ -581,13 +599,13 @@ register_codex_mcp() {
   if ! have_cmd codex; then
     die "codex command not found; use --mcp-client none or install Codex CLI" 1
   fi
-  ACTIONS+=("register Codex MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp")
+  ACTIONS+=("register Codex MCP server $MCP_NAME at $INSTALL_DIR/wx-mcp serve-mcp")
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
 
   run_logged codex mcp remove "$MCP_NAME" || true
-  run_logged codex mcp add "$MCP_NAME" -- "$INSTALL_DIR/wx-mcp" || die "Codex MCP registration failed; see $INSTALL_LOG" 1
+  run_logged codex mcp add "$MCP_NAME" -- "$INSTALL_DIR/wx-mcp" serve-mcp || die "Codex MCP registration failed; see $INSTALL_LOG" 1
   MCP_REGISTERED=1
   MCP_REGISTERED_CLIENTS+=("codex")
 }
