@@ -4732,6 +4732,11 @@ func pythonHasFasterWhisper(python string) bool {
 }
 
 func runConfiguredVoiceTranscriber(command, audioPath string) (string, error) {
+	if runtime.GOOS == "windows" {
+		if out, err := runConfiguredVoiceTranscriberDirect(command, audioPath); err == nil {
+			return string(out), nil
+		}
+	}
 	if !strings.Contains(command, "{audio}") {
 		command += " " + shellQuote(audioPath)
 	} else {
@@ -4741,6 +4746,57 @@ func runConfiguredVoiceTranscriber(command, audioPath string) (string, error) {
 	defer cancel()
 	out, err := runShellCommandOutput(ctx, command)
 	return string(out), err
+}
+
+func runConfiguredVoiceTranscriberDirect(command, audioPath string) ([]byte, error) {
+	args, ok := splitWindowsCommandLine(command)
+	if !ok || len(args) == 0 {
+		return nil, fmt.Errorf("parse voice transcriber command")
+	}
+	hasAudio := strings.Contains(command, "{audio}")
+	for i := range args {
+		args[i] = strings.ReplaceAll(args[i], "{audio}", audioPath)
+	}
+	if !hasAudio {
+		args = append(args, audioPath)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
+	defer cancel()
+	return exec.CommandContext(ctx, args[0], args[1:]...).Output()
+}
+
+func splitWindowsCommandLine(s string) ([]string, bool) {
+	var args []string
+	var b strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '"':
+			if inQuote && i+1 < len(s) && s[i+1] == '"' {
+				b.WriteByte('"')
+				i++
+			} else {
+				inQuote = !inQuote
+			}
+		case ' ', '\t', '\r', '\n':
+			if inQuote {
+				b.WriteByte(ch)
+			} else if b.Len() > 0 {
+				args = append(args, b.String())
+				b.Reset()
+			}
+		default:
+			b.WriteByte(ch)
+		}
+	}
+	if inQuote {
+		return nil, false
+	}
+	if b.Len() > 0 {
+		args = append(args, b.String())
+	}
+	return args, true
 }
 
 func runShellCommandOutput(ctx context.Context, command string) ([]byte, error) {

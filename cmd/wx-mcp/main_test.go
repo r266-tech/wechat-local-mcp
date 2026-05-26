@@ -747,6 +747,25 @@ func main() {
 	}
 }
 
+func TestSplitWindowsCommandLine(t *testing.T) {
+	got, ok := splitWindowsCommandLine(`"C:\Program Files\wx-mcp\asr.exe" --input "{audio}"`)
+	if !ok {
+		t.Fatal("splitWindowsCommandLine returned !ok")
+	}
+	want := []string{`C:\Program Files\wx-mcp\asr.exe`, "--input", "{audio}"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %#v, want %#v", got, want)
+		}
+	}
+	if _, ok := splitWindowsCommandLine(`"unterminated`); ok {
+		t.Fatal("splitWindowsCommandLine accepted unterminated quote")
+	}
+}
+
 func buildTestBinary(t *testing.T, dir, name, source string) string {
 	t.Helper()
 	src := filepath.Join(dir, name+".go")
