@@ -1523,12 +1523,20 @@ func TestCriticalCacheSourceClassification(t *testing.T) {
 	}
 }
 
-func TestCacheDriftedAfterRefresh(t *testing.T) {
-	if !cacheDriftedAfterRefresh("changed source db: session/session.db") {
-		t.Fatalf("changed metadata source db should be treated as post-refresh drift")
+func TestStaleCacheIndexUsable(t *testing.T) {
+	for _, reason := range []string{
+		"changed source db: session/session.db",
+		"critical snapshot error: session/session.db",
+	} {
+		if !staleCacheIndexUsable(reason) {
+			t.Fatalf("%q should allow serving the existing metadata index", reason)
+		}
 	}
-	if cacheDriftedAfterRefresh("critical snapshot error: session/session.db") {
-		t.Fatalf("critical snapshot errors must not be ignored")
+	if staleCacheIndexUsable("cache index missing") {
+		t.Fatalf("missing index should not be treated as usable")
+	}
+	if !cacheRefreshWouldLikelyRepeat("critical snapshot error: session/session.db") {
+		t.Fatalf("critical snapshot errors should not spawn repeated background refreshes")
 	}
 }
 
@@ -1566,6 +1574,99 @@ func TestMetadataStatusReason(t *testing.T) {
 		if got := metadataStatusReason(tt.reason); got != tt.want {
 			t.Fatalf("metadataStatusReason(%q) = %q, want %q", tt.reason, got, tt.want)
 		}
+	}
+}
+
+func TestResolveChatServesDegradedMetadataCache(t *testing.T) {
+	wcdbPath, err := filepath.Abs(filepath.Join("..", "..", "lib", "libWCDB.dylib"))
+	if err != nil {
+		t.Fatalf("abs wcdb path: %v", err)
+	}
+	if _, err := os.Stat(wcdbPath); err != nil {
+		t.Skipf("libWCDB.dylib not available: %v", err)
+	}
+	t.Setenv("WECHAT_CLI_WCDB_DYLIB", wcdbPath)
+	t.Setenv("WECHAT_CLI_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("WECHAT_CLI_DISABLE_AUTO_REFRESH", "1")
+
+	dbRoot := filepath.Join(t.TempDir(), "wechat-root")
+	for _, rel := range []string{"contact/contact.db", "session/session.db"} {
+		path := filepath.Join(dbRoot, "db_storage", filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir source: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("0123456789abcdef"), 0o600); err != nil {
+			t.Fatalf("write source: %v", err)
+		}
+	}
+	cfg := &config.Config{
+		Wxid:   "wxid_degraded_test",
+		DBRoot: dbRoot,
+		Keys:   map[string]string{"dummy": "dummy"},
+	}
+	paths, err := cachePathsFor(cfg)
+	if err != nil {
+		t.Fatalf("cache paths: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.IndexPath), 0o700); err != nil {
+		t.Fatalf("mkdir index: %v", err)
+	}
+	if err := wcdb.Bootstrap(wcdbPath); err != nil {
+		t.Fatalf("bootstrap wcdb: %v", err)
+	}
+	db, err := wcdb.OpenPlain(paths.IndexPath, true)
+	if err != nil {
+		t.Fatalf("open test index: %v", err)
+	}
+	if err := createIndexSchema(db); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	contactSrc := filepath.Join(dbRoot, "db_storage", "contact", "contact.db")
+	sessionSrc := filepath.Join(dbRoot, "db_storage", "session", "session.db")
+	contactSnapshot := filepath.Join(paths.RawDir, "contact", "contact.db")
+	if err := os.MkdirAll(filepath.Dir(contactSnapshot), 0o700); err != nil {
+		t.Fatalf("mkdir contact snapshot: %v", err)
+	}
+	if err := os.WriteFile(contactSnapshot, []byte("snapshot"), 0o600); err != nil {
+		t.Fatalf("write contact snapshot: %v", err)
+	}
+	if err := db.ExecArgs(`INSERT INTO cache_files
+		(rel_path, source_path, snapshot_path, db_mtime, wal_mtime, salt_hex, status, error, copied_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"contact/contact.db", contactSrc, contactSnapshot,
+		fileMTimeNanos(contactSrc), fileMTimeNanos(contactSrc+"-wal"), readSaltHex(contactSrc),
+		"ok", "", time.Now().Unix()); err != nil {
+		t.Fatalf("insert contact meta: %v", err)
+	}
+	if err := db.ExecArgs(`INSERT INTO cache_files
+		(rel_path, source_path, snapshot_path, db_mtime, wal_mtime, salt_hex, status, error, copied_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"session/session.db", sessionSrc, filepath.Join(paths.RawDir, "session", "session.db"),
+		fileMTimeNanos(sessionSrc), fileMTimeNanos(sessionSrc+"-wal"), readSaltHex(sessionSrc),
+		"error", "no enc_key for salt test", time.Now().Unix()); err != nil {
+		t.Fatalf("insert session meta: %v", err)
+	}
+	if err := db.ExecArgs(`INSERT INTO contacts_unified
+		(username, display_name, nick_name, remark, alias, description, type, is_verified)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"room@chatroom", "wxmcp测试群", "wxmcp测试群", "", "", "", "group", 0); err != nil {
+		t.Fatalf("insert contact: %v", err)
+	}
+	db.Close()
+
+	srv := &server{cfg: cfg, wcdbPath: wcdbPath, ok: true}
+	got, err := srv.toolResolveChat(map[string]any{"query": "wxmcp测试群"})
+	if err != nil {
+		t.Fatalf("toolResolveChat returned error: %v", err)
+	}
+	out := got.(map[string]any)
+	warnings, ok := out["warnings"].([]string)
+	if !ok || len(warnings) == 0 || !strings.Contains(warnings[0], "session/session.db") {
+		t.Fatalf("warnings = %#v, want degraded session metadata warning", out["warnings"])
+	}
+	cands := out["candidates"].([]chatCandidate)
+	if len(cands) != 1 || cands[0].Username != "room@chatroom" {
+		t.Fatalf("candidates = %#v", cands)
 	}
 }
 
@@ -2167,6 +2268,9 @@ func TestAcquireCacheRefreshLock(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".wechat-cli", "cache-refresh.lock")); err != nil {
 		t.Fatalf("lock dir missing at %s: %v", lockPath, err)
 	}
+	if _, err := os.Stat(filepath.Join(lockPath, cacheRefreshLockOwnerFile)); err != nil {
+		t.Fatalf("lock owner missing: %v", err)
+	}
 
 	_, acquired2, _, err := acquireCacheRefreshLock()
 	if err != nil {
@@ -2180,5 +2284,30 @@ func TestAcquireCacheRefreshLock(t *testing.T) {
 	_, err = os.Stat(lockPath)
 	if !os.IsNotExist(err) {
 		t.Fatalf("lock should be removed after unlock, stat err=%v", err)
+	}
+}
+
+func TestAcquireCacheRefreshLockRecoversLegacyEmptyLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	lockPath := filepath.Join(home, ".wechat-cli", "cache-refresh.lock")
+	if err := os.MkdirAll(lockPath, 0o700); err != nil {
+		t.Fatalf("mkdir legacy lock: %v", err)
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(lockPath, old, old); err != nil {
+		t.Fatalf("chtimes legacy lock: %v", err)
+	}
+
+	unlock, acquired, gotPath, err := acquireCacheRefreshLock()
+	if err != nil {
+		t.Fatalf("acquire legacy lock returned error: %v", err)
+	}
+	if !acquired || gotPath != lockPath {
+		t.Fatalf("acquired=%v path=%q, want acquired legacy path %q", acquired, gotPath, lockPath)
+	}
+	defer unlock()
+	if _, err := os.Stat(filepath.Join(lockPath, cacheRefreshLockOwnerFile)); err != nil {
+		t.Fatalf("new owner missing after legacy recovery: %v", err)
 	}
 }

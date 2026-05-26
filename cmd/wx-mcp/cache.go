@@ -115,39 +115,57 @@ func safeCacheID(s string) string {
 }
 
 func (s *server) openCacheIndex(writable bool) (*wcdb.DB, error) {
+	db, _, err := s.openCacheIndexWithWarningsMode(writable)
+	return db, err
+}
+
+func (s *server) openCacheIndexWithWarnings() (*wcdb.DB, []string, error) {
+	return s.openCacheIndexWithWarningsMode(false)
+}
+
+func (s *server) openCacheIndexWithWarningsMode(writable bool) (*wcdb.DB, []string, error) {
 	if err := s.ensure(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := wcdb.Bootstrap(s.wcdbPath); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	paths, err := s.cachePaths()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var warnings []string
 	if !writable {
 		if err := s.ensureCacheFresh(paths); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, err := os.Stat(paths.IndexPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return nil, errCacheMissing
+				return nil, nil, errCacheMissing
 			}
-			return nil, err
+			return nil, nil, err
+		}
+		if fresh, reason, err := s.cacheFreshness(s.cfg, paths); err == nil && !fresh && staleCacheIndexUsable(reason) {
+			warnings = append(warnings, metadataStatusReason(reason))
 		}
 	}
-	return wcdb.OpenPlain(paths.IndexPath, writable)
+	db, err := wcdb.OpenPlain(paths.IndexPath, writable)
+	return db, warnings, err
 }
 
 func (s *server) ensureCacheFresh(paths cachePaths) error {
 	if envBoolAny("WECHAT_CLI_DISABLE_AUTO_REFRESH", "WX_MCP_DISABLE_AUTO_REFRESH") {
 		return nil
 	}
-	fresh, _, err := s.cacheFreshness(s.cfg, paths)
+	fresh, reason, err := s.cacheFreshness(s.cfg, paths)
 	if err != nil {
 		return err
 	}
 	if fresh {
+		return nil
+	}
+	if fileExists(paths.IndexPath) && staleCacheIndexUsable(reason) {
+		s.maybeSpawnMetadataRefresh(reason)
 		return nil
 	}
 	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
@@ -164,7 +182,7 @@ func (s *server) ensureCacheFresh(paths cachePaths) error {
 			return err
 		}
 		if !fresh {
-			if cacheDriftedAfterRefresh(reason) {
+			if staleCacheIndexUsable(reason) {
 				return nil
 			}
 			return fmt.Errorf("cache refresh completed but cache is still not usable: %s", reason)
@@ -172,22 +190,82 @@ func (s *server) ensureCacheFresh(paths cachePaths) error {
 		return nil
 	}
 
-	deadline := time.Now().Add(10 * time.Minute)
+	wait := cacheAutoRefreshWait()
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
-		time.Sleep(2 * time.Second)
-		fresh, _, err := s.cacheFreshness(s.cfg, paths)
+		time.Sleep(500 * time.Millisecond)
+		fresh, reason, err := s.cacheFreshness(s.cfg, paths)
 		if err != nil {
 			return err
 		}
 		if fresh {
 			return nil
 		}
+		if fileExists(paths.IndexPath) && staleCacheIndexUsable(reason) {
+			return nil
+		}
+	}
+	if wait <= 0 {
+		fresh, reason, err := s.cacheFreshness(s.cfg, paths)
+		if err != nil {
+			return err
+		}
+		if fresh || (fileExists(paths.IndexPath) && staleCacheIndexUsable(reason)) {
+			return nil
+		}
 	}
 	return fmt.Errorf("cache refresh already running and cache is still stale after waiting (lock: %s)", lockPath)
 }
 
-func cacheDriftedAfterRefresh(reason string) bool {
-	return strings.HasPrefix(reason, "changed source db: ")
+func (s *server) maybeSpawnMetadataRefresh(reason string) {
+	if cacheRefreshWouldLikelyRepeat(reason) {
+		return
+	}
+	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
+	if err != nil || !acquired {
+		return
+	}
+	if _, err := spawnBackgroundCacheRefresh(false, lockPath); err != nil {
+		unlock()
+	}
+}
+
+func staleCacheIndexUsable(reason string) bool {
+	for _, prefix := range []string{
+		"changed source db: ",
+		"new source db: ",
+		"snapshot missing: ",
+		"critical snapshot error: ",
+	} {
+		if strings.HasPrefix(reason, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheRefreshWouldLikelyRepeat(reason string) bool {
+	return strings.HasPrefix(reason, "critical snapshot error: ")
+}
+
+func cacheAutoRefreshWait() time.Duration {
+	raw := strings.TrimSpace(envFirst("WECHAT_CLI_AUTO_REFRESH_WAIT", "WX_MCP_AUTO_REFRESH_WAIT"))
+	if raw == "" {
+		return 5 * time.Second
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		if n < 0 {
+			return 0
+		}
+		return time.Duration(n) * time.Second
+	}
+	return 5 * time.Second
 }
 
 func metadataStatusReason(reason string) string {
@@ -372,6 +450,10 @@ func (s *server) toolCacheStatus(a map[string]any) (any, error) {
 		if fresh, reason, err := s.cacheFreshness(cfg, paths); err == nil {
 			if !fresh && reason != "" {
 				out["metadata_stale_reason"] = metadataStatusReason(reason)
+				if staleCacheIndexUsable(reason) {
+					out["warnings"] = []string{"metadata_cache_degraded"}
+					out["degraded"] = true
+				}
 			}
 		}
 	}
@@ -470,7 +552,9 @@ func acquireCacheRefreshLock() (func(), bool, string, error) {
 		if held == "1" {
 			return func() {}, true, "", nil
 		}
-		return func() { _ = os.Remove(held) }, true, held, nil
+		_ = os.MkdirAll(held, 0o700)
+		_ = writeCacheRefreshLockOwner(held)
+		return func() { _ = os.RemoveAll(held) }, true, held, nil
 	}
 	stateDir, err := appStateDir()
 	if err != nil {
@@ -481,19 +565,73 @@ func acquireCacheRefreshLock() (func(), bool, string, error) {
 		return nil, false, lockDir, err
 	}
 	if err := os.Mkdir(lockDir, 0o700); err == nil {
-		return func() { _ = os.Remove(lockDir) }, true, lockDir, nil
+		if err := writeCacheRefreshLockOwner(lockDir); err != nil {
+			_ = os.RemoveAll(lockDir)
+			return nil, false, lockDir, err
+		}
+		return func() { _ = os.RemoveAll(lockDir) }, true, lockDir, nil
 	} else if !errors.Is(err, os.ErrExist) {
 		return nil, false, lockDir, err
 	}
-	if st, err := os.Stat(lockDir); err == nil && time.Since(st.ModTime()) > 2*time.Hour {
-		_ = os.Remove(lockDir)
+	if cacheRefreshLockStale(lockDir) {
+		_ = os.RemoveAll(lockDir)
 		if err := os.Mkdir(lockDir, 0o700); err == nil {
-			return func() { _ = os.Remove(lockDir) }, true, lockDir, nil
+			if err := writeCacheRefreshLockOwner(lockDir); err != nil {
+				_ = os.RemoveAll(lockDir)
+				return nil, false, lockDir, err
+			}
+			return func() { _ = os.RemoveAll(lockDir) }, true, lockDir, nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return nil, false, lockDir, err
 		}
 	}
 	return nil, false, lockDir, nil
+}
+
+const cacheRefreshLockOwnerFile = "owner.json"
+
+type cacheRefreshLockOwner struct {
+	PID       int    `json:"pid"`
+	StartedAt int64  `json:"started_at"`
+	Command   string `json:"command,omitempty"`
+}
+
+func writeCacheRefreshLockOwner(lockDir string) error {
+	info := cacheRefreshLockOwner{
+		PID:       os.Getpid(),
+		StartedAt: time.Now().Unix(),
+	}
+	if len(os.Args) > 0 {
+		info.Command = strings.Join(os.Args, " ")
+	}
+	b, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(lockDir, cacheRefreshLockOwnerFile), append(b, '\n'), 0o600)
+}
+
+func cacheRefreshLockStale(lockDir string) bool {
+	st, err := os.Stat(lockDir)
+	if err != nil {
+		return false
+	}
+	age := time.Since(st.ModTime())
+	if age > 2*time.Hour {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(lockDir, cacheRefreshLockOwnerFile))
+	if err != nil {
+		return age > 30*time.Second
+	}
+	var owner cacheRefreshLockOwner
+	if err := json.Unmarshal(b, &owner); err != nil || owner.PID <= 0 {
+		return age > 30*time.Second
+	}
+	if processAlive(owner.PID) {
+		return false
+	}
+	return age > 5*time.Second
 }
 
 func (s *server) refreshCache(force bool) (any, error) {

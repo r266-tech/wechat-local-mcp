@@ -299,7 +299,7 @@ func (s *server) toolResolveChat(a map[string]any) (any, error) {
 	if query == "" {
 		query = getStr(a, "keyword")
 	}
-	db, err := s.openCacheIndex(false)
+	db, warnings, err := s.openCacheIndexWithWarnings()
 	if err != nil {
 		return nil, err
 	}
@@ -309,8 +309,12 @@ func (s *server) toolResolveChat(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	out := map[string]any{
 		"query":      query,
 		"candidates": cands,
-	}, nil
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	return out, nil
 }
