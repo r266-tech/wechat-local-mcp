@@ -708,13 +708,17 @@ classify_install_log_blocker() {
       BLOCKED_BY="app_management_denied"
       NEXT_ACTION="Grant App Management/Full Disk Access if macOS requests it, then rerun ./install.sh --bootstrap --refresh --yes --json."
       ;;
-    *"task_for_pid"*|*"not permitted"*)
-      BLOCKED_BY="task_for_pid_denied"
-      NEXT_ACTION="Rerun ./wxkey bootstrap from the Mac desktop session and enter the wechat-cli hidden admin-password prompt."
-      ;;
     *"Full Disk Access"*|*"TCC"*|*"another app"*)
       BLOCKED_BY="full_disk_access"
       NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wechat-cli/wechat-cli and ~/.local/share/wechat-cli/wxkey, then rerun install."
+      ;;
+    *"scan deadline exceeded"*|*"timed out after"*)
+      BLOCKED_BY="key_scan_timeout"
+      NEXT_ACTION="Keep WeChat open, open the chats/pages that need decrypting, then rerun ./install.sh --bootstrap --refresh --yes --json. The previous scan timed out instead of hanging."
+      ;;
+    *"task_for_pid"*|*"not permitted"*)
+      BLOCKED_BY="task_for_pid_denied"
+      NEXT_ACTION="Rerun ./wxkey bootstrap from the Mac desktop session and enter the wechat-cli hidden admin-password prompt."
       ;;
     *)
       BLOCKED_BY="bootstrap_failed"

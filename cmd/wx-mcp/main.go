@@ -188,18 +188,64 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	if err != nil {
 		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WECHAT_CLI_DB_ROOT matches the logged-in account, then retry.", err, stderr)
 	}
+	beforeCount := 0
+	if s.cfg != nil {
+		beforeCount = len(s.cfg.Keys)
+	}
 	fresh, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("reload config after wxkey setup: %w", err)
+	}
+	fresh = mergeRuntimeKeyConfig(s.cfg, fresh)
+	if err := config.Save(fresh); err != nil {
+		return fmt.Errorf("persist merged wxkey config: %w", err)
 	}
 	if !fresh.Ready() {
 		return fmt.Errorf("wxkey setup completed but config still has no schema-2 enc_key map")
 	}
 	s.cfg = fresh
 	s.ok = true
-	fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d per-DB keys cached for wxid=%s\n", appName,
-		len(res.Keys), res.WxID)
+	if len(fresh.Keys) > len(res.Keys) || len(fresh.Keys) > beforeCount {
+		fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d new/seen keys, %d total cached for wxid=%s\n", appName,
+			len(res.Keys), len(fresh.Keys), res.WxID)
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d per-DB keys cached for wxid=%s\n", appName,
+			len(fresh.Keys), res.WxID)
+	}
 	return nil
+}
+
+func mergeRuntimeKeyConfig(oldCfg, fresh *config.Config) *config.Config {
+	if fresh == nil {
+		fresh = &config.Config{}
+	}
+	if oldCfg == nil {
+		return fresh
+	}
+	if fresh.Keys == nil {
+		fresh.Keys = map[string]string{}
+	}
+	for salt, key := range oldCfg.Keys {
+		if _, ok := fresh.Keys[salt]; !ok {
+			fresh.Keys[salt] = key
+		}
+	}
+	if fresh.ImageKey == "" {
+		fresh.ImageKey = oldCfg.ImageKey
+	}
+	if fresh.ImageXORKey == nil {
+		fresh.ImageXORKey = oldCfg.ImageXORKey
+	}
+	if fresh.DBRoot == "" {
+		fresh.DBRoot = oldCfg.DBRoot
+	}
+	if fresh.Wxid == "" {
+		fresh.Wxid = oldCfg.Wxid
+	}
+	if fresh.KeyEpoch < oldCfg.KeyEpoch {
+		fresh.KeyEpoch = oldCfg.KeyEpoch
+	}
+	return fresh
 }
 
 func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {

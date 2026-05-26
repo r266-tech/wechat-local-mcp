@@ -121,6 +121,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Mcp
 | --- | --- |
 | 找不到会话 | 先用 `wechat-cli resolve-chat "名字"` 看候选，必要时在微信里打开对应聊天后重试 |
 | 提示缺 key | 确认微信已登录并打开过聊天；macOS agent 可跑 `wxkey doctor` / `wxkey setup` |
+| 首次安装卡在 key scan | 新版会超时返回 `blocked_by=key_scan_timeout`，不会无限挂住；保持微信打开后重跑安装 |
 | macOS 频繁弹隐私授权 | 给 `wechat-cli` 和 `wxkey` 加 Full Disk Access |
 | 图片只有 warning 没 path | 微信本地只有 `.dat` 且 image key 仍不可用；打开原图或对应聊天后重试 |
 | Windows 初始化失败 | 确认 Windows 微信登录、`WECHAT_CLI_DB_ROOT` 指向直接包含 `db_storage` 的账号目录 |

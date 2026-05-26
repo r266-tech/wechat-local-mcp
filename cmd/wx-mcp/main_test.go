@@ -1478,6 +1478,38 @@ func TestRefreshReasonAlreadySatisfiedReloadsMissingSalt(t *testing.T) {
 	}
 }
 
+func TestMergeRuntimeKeyConfigKeepsExistingKeys(t *testing.T) {
+	xorKey := 240
+	oldCfg := &config.Config{
+		Wxid:        "wxid_old",
+		DBRoot:      "/old",
+		Keys:        map[string]string{"old_salt": "old_key", "shared": "old_shared"},
+		ImageKey:    "image_key",
+		ImageXORKey: &xorKey,
+		KeyEpoch:    20,
+	}
+	fresh := &config.Config{
+		Wxid:     "wxid_new",
+		DBRoot:   "/new",
+		Keys:     map[string]string{"shared": "new_shared", "new_salt": "new_key"},
+		KeyEpoch: 10,
+	}
+
+	got := mergeRuntimeKeyConfig(oldCfg, fresh)
+	if got.Keys["old_salt"] != "old_key" || got.Keys["new_salt"] != "new_key" || got.Keys["shared"] != "new_shared" {
+		t.Fatalf("merged keys = %#v", got.Keys)
+	}
+	if got.ImageKey != "image_key" || got.ImageXORKey == nil || *got.ImageXORKey != xorKey {
+		t.Fatalf("image key fields were not preserved: %#v", got)
+	}
+	if got.Wxid != "wxid_new" || got.DBRoot != "/new" {
+		t.Fatalf("fresh identity should win: %#v", got)
+	}
+	if got.KeyEpoch != 20 {
+		t.Fatalf("KeyEpoch = %d, want 20", got.KeyEpoch)
+	}
+}
+
 func TestCriticalCacheSourceClassification(t *testing.T) {
 	for _, rel := range []string{"contact/contact.db", "session/session.db"} {
 		if !isCriticalCacheSource(rel) {
