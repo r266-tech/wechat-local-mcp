@@ -1159,7 +1159,7 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format string) 
 		}
 		batchArgs["limit"] = limit
 		batchArgs["offset"] = baseOffset + written
-		rows, err := s.queryLiveMessages(batchArgs, "create_time ASC, local_id ASC")
+		rows, _, err := s.queryLiveMessages(batchArgs, "create_time ASC, local_id ASC")
 		if err != nil {
 			return written, err
 		}

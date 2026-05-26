@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a distribution zip: wx-mcp + wxkey binaries + local libWCDB.dylib +
-# install.sh + docs. Friend/agent解压后跑
+# install.sh + one-line bootstrap helper + docs. Friend/agent解压后跑
 # `./install.sh --all --yes --json` 即可完成安装和 MCP 注册.
 # 前提: 若目标机器没有现成 schema-2 key map, ./install.sh --all 会跑
 # ./wxkey bootstrap; 它会走 no-SIP + Keychain sudo + ad-hoc 重签路线完成首次
@@ -43,6 +43,8 @@ cp "$DYLIB_SRC" "$DIST/libWCDB.dylib"
 
 echo "→ copying docs..."
 cp README.md llms.txt LICENSE SECURITY.md THIRD_PARTY_NOTICES.md AGENTS.md mcp-server.json "$DIST/"
+mkdir -p "$DIST/scripts"
+cp scripts/install-release.sh "$DIST/scripts/"
 
 echo "→ copying installer..."
 cp install.sh "$DIST/"

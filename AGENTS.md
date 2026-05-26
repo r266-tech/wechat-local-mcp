@@ -25,15 +25,30 @@ WeCom bot, or reply bot. It is a local-data MCP server for WeChat 4.x.
 
 ## Fast Path
 
-If the user gives you the GitHub repository URL, prefer the latest release zip
-for the user's OS over a source clone. The macOS release zip is the complete
-install unit: `wx-mcp`, `wxkey`, `libWCDB.dylib`, `install.sh`, `README.md`,
-`llms.txt`, `AGENTS.md`, and `mcp-server.json`. The Windows release zip is the
-complete install unit: `wx-mcp.exe`, `libWCDB.dll`, `install.ps1`, `README.md`,
-`llms.txt`, `AGENTS.md`, and `mcp-server.json`.
+If the user gives you the GitHub repository URL, prefer the release bootstrap
+or latest release zip for the user's OS over a source clone. The macOS release
+zip is the complete install unit: `wx-mcp`, `wxkey`, `libWCDB.dylib`,
+`install.sh`, `README.md`, `llms.txt`, `AGENTS.md`, `mcp-server.json`, and
+`scripts/install-release.sh`. The Windows release zip is the complete install
+unit: `wx-mcp.exe`, `libWCDB.dll`, `install.ps1`, `README.md`, `llms.txt`,
+`AGENTS.md`, `mcp-server.json`, and `scripts/install-release.ps1`.
 Use the stable release asset name `wx-mcp-latest-darwin-arm64.zip` or
 `wx-mcp-latest-windows-amd64.zip` when present; otherwise pick the newest
 versioned asset for the same platform.
+
+Human-friendly one-line macOS install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh
+```
+
+Agent JSON macOS install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | env WX_MCP_INSTALL_JSON=1 zsh
+```
+
+Release zip macOS install:
 
 ```bash
 ./install.sh --dry-run --all --json
@@ -43,6 +58,13 @@ versioned asset for the same platform.
 ## Windows Fast Path
 
 On Windows, use the PowerShell installer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WX_MCP_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"
+```
+
+Release zip Windows install:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -All -Json
@@ -167,12 +189,12 @@ user explicitly wants background CPU cost.
   chat/page in WeChat.
 - Do not manually run `cache_refresh` before normal reads. Metadata-backed tools perform an internal refresh gate before returning data; use `cache_status` only to inspect metadata cache diagnostics and errors. If a human explicitly asks for refresh through MCP, prefer `cache_refresh` with `background=true` to avoid tool-call timeout.
 - Use `resolve_chat` before tools that accept human names.
-- Use `chat_timeline` as the normal chat-reading entrypoint for "show/summarize recent chat". It resolves `chat`, reads live messages, defaults to `order=desc` plus `display_order=asc`, and returns `query` / `freshness` / `messages`.
-- Treat each `chat_timeline.messages[]` row as the agent-ready source of truth: `id(local_id/server_id_str/talker)`, `time`, `sender`, `sender_wxid`, `is_from_me`, `kind`, `text`, display-ready `images` / `videos` / `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` / `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and concise `warnings`. `forward_chat.items` is a recursive tree up to depth 5; nested images/links/files/quotes are represented on the nested item itself.
-- Use `messages(view=agent)` only when you need lower-level filters or ordering but still want the same low-noise rows. Do not use `fields=full` for normal user-facing chat reading; the agent/display path should already include common non-text details such as link URLs, file refs, quote summaries, transfers, and red packets.
-- Default agent output follows the WeChat UI principle: if a human sees information in WeChat and it affects understanding, return it by default; implementation materials such as protocol codes, CDN/aeskey, raw XML, unreadable `.dat`, raw SILK, and duplicate candidate paths belong in `include_debug=true`, `fields=full`, or `media_resources`.
-- `messages` still fills local image/video/file/voice materials internally by default; pass `include_media_paths=false` only when you need text-only results. Images/videos in agent view should expose directly readable local `path` values only. Voice rows are read from `media_0.db/VoiceInfo`; wx-mcp attempts local transcription with `faster-whisper large-v3` first and returns `voice.transcript` by default, while raw SILK/WAV paths stay in debug/media_resources. For maintainer diagnostics, pass `include_debug=true` / `debug=true` or `fields=full` to inspect `media_local_paths`, compact `media_resources`, `media_read_hints`, CDN/aeskey details, raw XML, and decode/transcription status. wx-mcp best-effort decodes local image `.dat` files into `~/.wx-mcp/media-cache`; if WeChat V4 image `image_key` is missing, expect concise warnings in agent/lite views and detailed `decode_status=needs_image_key` only in debug/full output. wx-mcp does not perform visual recognition.
-- Use `media_resources` after `messages`/`search` when you need a separate attachment lookup by `local_id`/`server_id`, resource sizes, download status, `file://` URIs, `local_path_details`, or direct-readability hints. For image resources, it also checks message XML md5 to surface matched temp PNG/JPG `direct_readable_local_paths` when available. Prefer `server_id_str` for 64-bit server IDs if you are copying IDs through JSON.
+- Use `chat_timeline` as the normal chat-reading entrypoint for "show/summarize recent chat". It resolves `chat`, reads live messages, defaults to `order=desc` plus `display_order=asc`, and returns `query` / `freshness` / `messages`. Use `query.has_more` and `query.next_offset` to page through a whole chat.
+- Treat each `chat_timeline.messages[]` row as the agent-ready source of truth: `id(local_id/server_id_str/talker)`, `time`, `create_time`, `time_iso`, `sender`, `sender_wxid`, `is_from_me`, `kind`, `text`, display-ready `images` / `videos` / `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` / `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and concise `warnings`. `forward_chat.items` is a recursive tree up to depth 5; nested images/links/files/quotes are represented on the nested item itself and use `source_id` to link back to the source message when known. If nested media cannot be resolved, expect an explicit warning rather than silent omission.
+- Use `messages(view=agent)` only when you need lower-level filters or ordering but still want the same low-noise `query` / `freshness` / `messages` envelope. Do not use `fields=full` for normal user-facing chat reading; the agent/display path should already include common non-text details such as link URLs, file refs, quote summaries, transfers, and red packets.
+- Default agent output follows the WeChat UI principle: if a human sees information in WeChat and it affects understanding, return it by default; implementation materials such as protocol codes, CDN/aeskey, raw XML, unreadable `.dat`, raw SILK, and duplicate candidate paths belong in `include_debug=true`, `fields=full`, or `media_resources(debug=true)`.
+- `messages` still fills local image/video/file/voice materials internally by default; pass `include_media_paths=false` only when you need text-only results. Images/videos in agent view should expose directly readable local `path` values only. Voice rows are read from `media_0.db/VoiceInfo`; wx-mcp attempts local transcription with `faster-whisper large-v3` first and returns `voice.transcript` by default, while raw SILK/WAV paths stay in debug/media_resources. For maintainer diagnostics, pass `include_debug=true` / `debug=true` or `fields=full` to inspect `media_local_paths`, compact `media_resources`, `media_read_hints`, CDN/aeskey details, raw XML, and decode/transcription status. wx-mcp best-effort decodes local image `.dat` files into `~/.wx-mcp/media-cache`; if WeChat V4 image `image_key` or `image_xor_key` is missing/stale, wx-mcp first runs `wxkey image-key`, writes the refreshed key material to config, and retries decoding. On macOS, `wxkey image-key` prefers the no-process `kvcomm` cache derivation path and falls back to task_for_pid only if disk derivation cannot verify a key. Only failed refreshes should surface concise warnings in agent/lite views and detailed `decode_status=needs_image_key` in debug/full output. wx-mcp does not perform visual recognition.
+- Use `media_resources` after `messages`/`search` when you need a separate attachment lookup by `local_id`/`server_id`. Its default output is agent-ready: image/video/file `path` values are only directly readable local files, image messages also expose `images[].path`, and `resources[]` is kept to concise readable path summaries. Raw `.dat`, duplicate candidate paths, `file://` URIs, `local_path_details`, raw type/variant codes, resource ids/status, and decode internals require `include_debug=true` / `debug=true`. For image resources, it also checks message XML md5 to surface matched temp PNG/JPG files when available. Prefer `server_id_str` for 64-bit server IDs if you are copying IDs through JSON.
 - Use `search` default `search_mode=fts`; it reads WeChat's live local FTS DB by default, with metadata cache only for name resolution.
 - Use `messages` with `chat`/`talker` plus `after`/`before` for live incremental reads. There is no message-body cache mode and no global `new_messages` stream.
 - Use `export_messages` for large single-chat file outputs instead of asking the model to hold all rows in context. Global no-keyword export is intentionally unsupported.

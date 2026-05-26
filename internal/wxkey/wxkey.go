@@ -46,13 +46,15 @@ func FindBinary() (string, error) {
 // SetupResult mirrors what `wxkey setup` writes to stdout. We only consume
 // the bits wx-mcp needs.
 type SetupResult struct {
-	PID        int               `json:"pid"`
-	Root       string            `json:"scan_root"`
-	WxID       string            `json:"wxid"`
-	ConfigPath string            `json:"config_path"`
-	Stats      json.RawMessage   `json:"stats"`
-	Results    []ResultEntry     `json:"results"`
-	Keys       map[string]string `json:"-"` // populated from Results post-decode
+	PID           int               `json:"pid"`
+	Root          string            `json:"scan_root"`
+	WxID          string            `json:"wxid"`
+	ConfigPath    string            `json:"config_path"`
+	Stats         json.RawMessage   `json:"stats"`
+	Results       []ResultEntry     `json:"results"`
+	ImageKey      *ImageKeyResult   `json:"image_key,omitempty"`
+	ImageKeyError string            `json:"image_key_error,omitempty"`
+	Keys          map[string]string `json:"-"` // populated from Results post-decode
 }
 
 type ResultEntry struct {
@@ -61,6 +63,24 @@ type ResultEntry struct {
 	SaltHex  string `json:"salt_hex"`
 	KeyHex   string `json:"key_hex"`
 	VerifyAs string `json:"verify_as"`
+}
+
+type ImageKeyResult struct {
+	Key            string          `json:"key"`
+	XORKey         *int            `json:"xor_key,omitempty"`
+	TemplateFile   string          `json:"template_file,omitempty"`
+	TemplateSource string          `json:"template_source,omitempty"`
+	Regions        int             `json:"regions,omitempty"`
+	BytesScanned   uint64          `json:"bytes_scanned,omitempty"`
+	Candidates     int             `json:"candidates,omitempty"`
+	Elapsed        json.RawMessage `json:"elapsed_ns,omitempty"`
+}
+
+type ImageKeyCommandResult struct {
+	PID      int             `json:"pid"`
+	Root     string          `json:"scan_root"`
+	WxID     string          `json:"wxid"`
+	ImageKey *ImageKeyResult `json:"image_key,omitempty"`
 }
 
 // RunSetup refreshes schema-2 per-DB keys. On macOS/Linux builds this invokes
@@ -72,6 +92,36 @@ type ResultEntry struct {
 // stderrText is also returned so wx-mcp can surface progress / errors.
 func RunSetup() (*SetupResult, string, error) {
 	return runSetup()
+}
+
+func RunImageKey(root string) (*ImageKeyResult, string, error) {
+	bin, err := FindBinary()
+	if err != nil {
+		return nil, "", err
+	}
+	args := []string{"image-key", "--quiet"}
+	if root != "" {
+		args = append(args, "--root", root)
+	}
+	cmd := exec.Command(bin, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, runErr := cmd.Output()
+	if runErr != nil {
+		return nil, stderr.String(), fmt.Errorf("wxkey image-key failed: %w (stderr: %s)", runErr, stderr.String())
+	}
+	payload := stdout
+	if i := bytes.IndexByte(payload, '{'); i > 0 {
+		payload = payload[i:]
+	}
+	var res ImageKeyCommandResult
+	if err := json.Unmarshal(payload, &res); err != nil {
+		return nil, stderr.String(), fmt.Errorf("parse wxkey image-key output: %w (stdout %d bytes)", err, len(stdout))
+	}
+	if res.ImageKey == nil || res.ImageKey.Key == "" {
+		return nil, stderr.String(), fmt.Errorf("wxkey image-key completed without image_key")
+	}
+	return res.ImageKey, stderr.String(), nil
 }
 
 func runSetupExternal() (*SetupResult, string, error) {

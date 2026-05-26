@@ -22,6 +22,7 @@ type Config struct {
 	DBRoot        string            `json:"db_root"`
 	Keys          map[string]string `json:"keys,omitempty"`
 	ImageKey      string            `json:"image_key,omitempty"`
+	ImageXORKey   *int              `json:"image_xor_key,omitempty"`
 	Key           string            `json:"key,omitempty"`
 	KeyPID        int               `json:"key_pid,omitempty"`
 	KeyEpoch      int64             `json:"key_epoch,omitempty"`

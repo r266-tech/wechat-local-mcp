@@ -32,9 +32,22 @@ Release asset names:
 - macOS versioned: wx-mcp-vX.Y.Z-darwin-arm64.zip
 - Windows versioned: wx-mcp-vX.Y.Z-windows-amd64.zip
 
+Human one-line install on macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh
+```
+
+Human one-line install on Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"
+```
+
 Agent install path on macOS:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | env WX_MCP_INSTALL_JSON=1 zsh
 ./install.sh --dry-run --all --json
 ./install.sh --all --yes --json
 ```
@@ -42,6 +55,7 @@ Agent install path on macOS:
 Agent install path on Windows:
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WX_MCP_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -All -Json
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
 ```
@@ -55,9 +69,9 @@ Primary MCP tools:
 
 - sessions
 - resolve_chat
-- chat_timeline (preferred normal chat-reading tool; resolves chat names, reads live messages, defaults to newest window in chronological display order, and returns query/freshness/messages)
-- messages (use view=agent for low-noise rows with stable id, sender_wxid/is_from_me, time/sender/kind/text, and display-ready images/videos/files/voice.transcript/link/music/miniprogram/forward_chat/quote/transfer/red_packet/location/solitaire/warnings; default agent output returns WeChat UI-visible semantics, directly readable image/video/file paths, and local ASR voice transcripts, preferring faster-whisper large-v3, while keeping raw SILK, unreadable .dat, CDN/aeskey, protocol codes, and raw XML in debug/full/media_resources; forward_chat is recursively expanded to depth 5; quote carries the referenced message's visible payload; fields=full is maintainer diagnostics only, not normal chat reading; pass include_media_paths=false for text-only results)
-- media_resources (returns local_paths, local_path_uris, local_path_details with direct_readable/decode_status, direct_readable_local_paths for matched temp PNG/JPG image copies, decoded_local_paths when possible, and media_read_hints; wx-mcp does not perform visual recognition)
+- chat_timeline (preferred normal chat-reading tool; resolves chat names, reads live messages, defaults to newest window in chronological display order, and returns query/freshness/messages; query.has_more and query.next_offset support reliable pagination)
+- messages (use view=agent for the same query/freshness/messages envelope with low-noise rows containing stable id, sender_wxid/is_from_me, time/create_time/time_iso/sender/kind/text, and display-ready images/videos/files/voice.transcript/link/music/miniprogram/forward_chat/quote/transfer/red_packet/location/solitaire/warnings; default agent output returns WeChat UI-visible semantics, directly readable image/video/file paths, and local ASR voice transcripts, preferring faster-whisper large-v3, while keeping raw SILK, unreadable .dat, CDN/aeskey, protocol codes, and raw XML in debug/full/media_resources; WeChat V4 image .dat decode auto-refreshes missing/stale image_key/image_xor_key through wxkey image-key before falling back to warnings; macOS wxkey image-key prefers no-process kvcomm cache derivation and falls back to task_for_pid only if disk derivation cannot verify a key; forward_chat is recursively expanded to depth 5, uses source_id for source linkage, and warns when nested media is unresolved; quote carries the referenced message's visible payload; fields=full is maintainer diagnostics only, not normal chat reading; pass include_media_paths=false for text-only results)
+- media_resources (default output is agent-ready: resources[].path and images/videos/files[].path only contain directly readable local files, with raw resource ids/status/family/variant hidden by default; raw .dat, candidate paths, local_path_details, raw type/variant codes, decode internals, URIs, and media_read_hints require include_debug=true/debug=true; wx-mcp does not perform visual recognition)
 - search
 - unread
 - stats
@@ -70,7 +84,7 @@ Key differentiators:
 
 - reads local WeChat 4.x database data from the user's own machine
 - metadata cache for fast name/session resolution, with live message reads
-- release zip includes wx-mcp runtime, installer, WCDB dynamic library, README.md, llms.txt, AGENTS.md, and mcp-server.json
+- release zip includes wx-mcp runtime, installer, WCDB dynamic library, README.md, llms.txt, AGENTS.md, mcp-server.json, and one-line release bootstrap script
 - macOS first setup is agent-first: user enters Mac admin password once for wxkey bootstrap; later reads reuse stored Keychain credential
 - agents run wxkey doctor/setup retries themselves; users only perform GUI actions such as opening a missing WeChat chat/page
 - wxkey doctor is lightweight cached-coverage diagnosis by default; use wxkey doctor --scan only for live memory-scan verification

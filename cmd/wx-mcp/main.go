@@ -90,11 +90,18 @@ type server struct {
 	ok                        bool
 	keyRefreshMu              sync.Mutex
 	keyRefreshLast            map[string]time.Time
+	imageKeyRefreshMu         sync.Mutex
+	imageKeyRefreshLast       time.Time
 	readableImageIndexMu      sync.Mutex
 	readableImageIndexRoot    string
 	readableImageIndexBuiltAt time.Time
 	readableImageIndex        map[string][]readableImageCandidate
 }
+
+var (
+	runWxkeySetup    = wxkey.RunSetup
+	runWxkeyImageKey = wxkey.RunImageKey
+)
 
 // findWCDB locates the platform WCDB dynamic library.
 func findWCDB() (string, error) {
@@ -179,7 +186,7 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	}
 	s.keyRefreshLast[key] = time.Now()
 	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running wxkey key setup...\n", reason)
-	res, stderr, err := wxkey.RunSetup()
+	res, stderr, err := runWxkeySetup()
 	if err != nil {
 		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WX_MCP_DB_ROOT matches the logged-in account, then retry.", err, stderr)
 	}
@@ -194,6 +201,55 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	s.ok = true
 	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey setup OK — %d per-DB keys cached for wxid=%s\n",
 		len(res.Keys), res.WxID)
+	return nil
+}
+
+func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
+	if strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")) != "" {
+		return fmt.Errorf("WX_MCP_IMAGE_KEY is set; not overriding explicit image_key env")
+	}
+	s.imageKeyRefreshMu.Lock()
+	defer s.imageKeyRefreshMu.Unlock()
+
+	root := ""
+	if s.cfg != nil {
+		root = s.cfg.DBRoot
+	}
+	if fresh, err := config.Load(); err == nil {
+		if fresh.DBRoot != "" {
+			root = fresh.DBRoot
+		}
+		if !force && strings.TrimSpace(fresh.ImageKey) != "" && fresh.ImageXORKey != nil {
+			s.cfg = fresh
+			s.ok = fresh.Ready()
+			return nil
+		}
+	}
+	const retryInterval = 30 * time.Second
+	if !s.imageKeyRefreshLast.IsZero() && time.Since(s.imageKeyRefreshLast) < retryInterval {
+		return fmt.Errorf("%s; wxkey image-key was already attempted recently", reason)
+	}
+	s.imageKeyRefreshLast = time.Now()
+	fmt.Fprintf(os.Stderr, "[wx-mcp] %s — running wxkey image-key setup...\n", reason)
+	img, stderr, err := runWxkeyImageKey(root)
+	if err != nil {
+		return fmt.Errorf("wxkey image-key failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache, keep WeChat logged in, open an image chat, then retry.", err, stderr)
+	}
+	if img == nil || strings.TrimSpace(img.Key) == "" {
+		return fmt.Errorf("wxkey image-key completed without an image_key")
+	}
+	fresh, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("reload config after wxkey image-key: %w", err)
+	}
+	fresh.ImageKey = strings.TrimSpace(img.Key)
+	fresh.ImageXORKey = img.XORKey
+	if err := config.Save(fresh); err != nil {
+		return fmt.Errorf("save image_key config: %w", err)
+	}
+	s.cfg = fresh
+	s.ok = fresh.Ready()
+	fmt.Fprintf(os.Stderr, "[wx-mcp] wxkey image-key OK — image_key cached\n")
 	return nil
 }
 
@@ -402,10 +458,10 @@ func (s *server) handle(req rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.5.2"},
+			"serverInfo":      map[string]any{"name": "wx-mcp", "version": "1.5.3"},
 			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
 				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
-				"- Empty results when you expected data: report the gap to the user. Do not auto-trigger other tools to `fix` it — recovery (e.g. rerunning `wxkey setup`) is a privileged side effect that should be the user's call, not yours.\n" +
+				"- wx-mcp automatically refreshes missing DB enc_keys and WeChat V4 image_key when the stored no-SIP wxkey credential is available; if a tool still returns warnings/errors, surface the exact reason and next action.\n" +
 				"- Freshness check: `sessions limit=1`, compare `last_timestamp` to now. Stale by hours = WeChat likely not running.",
 		}}
 	case "tools/list":
@@ -630,7 +686,7 @@ func (s *server) toolContacts(a map[string]any) (any, error) {
 }
 
 func (s *server) toolMessages(a map[string]any) (any, error) {
-	rows, _, _, err := s.loadMessageRowsForOutput(a)
+	rows, page, queryOrder, displayOrder, err := s.loadMessageRowsForOutput(a)
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +695,8 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 		return nil, err
 	}
 	if view == "agent" {
-		return agentMessages(rows, includeDebugOutput(a)), nil
+		msgs := agentMessages(rows, includeDebugOutput(a))
+		return messageTimelineEnvelope(a, rows, msgs, page, queryOrder, displayOrder), nil
 	}
 	mode, err := fieldsMode(a)
 	if err != nil {
@@ -650,34 +707,46 @@ func (s *server) toolMessages(a map[string]any) (any, error) {
 
 func (s *server) toolChatTimeline(a map[string]any) (any, error) {
 	args := chatTimelineMessageArgs(a)
-	rows, queryOrder, displayOrder, err := s.loadMessageRowsForOutput(args)
+	rows, page, queryOrder, displayOrder, err := s.loadMessageRowsForOutput(args)
 	if err != nil {
 		return nil, err
 	}
 	msgs := agentMessages(rows, includeDebugOutput(args))
-	return chatTimelineEnvelope(args, rows, msgs, queryOrder, displayOrder), nil
+	return messageTimelineEnvelope(args, rows, msgs, page, queryOrder, displayOrder), nil
 }
 
-func (s *server) loadMessageRowsForOutput(a map[string]any) ([]wcdb.Row, string, string, error) {
+type messagePageInfo struct {
+	Limit      int
+	Offset     int
+	Returned   int
+	HasMore    bool
+	NextOffset int
+}
+
+func (s *server) loadMessageRowsForOutput(a map[string]any) ([]wcdb.Row, messagePageInfo, string, string, error) {
 	queryOrder, err := messageQueryOrderSQL(a)
 	if err != nil {
-		return nil, "", "", err
+		return nil, messagePageInfo{}, "", "", err
 	}
-	rows, err := s.queryLiveMessages(a, queryOrder)
+	rows, page, err := s.queryLiveMessages(a, queryOrder)
 	if err != nil {
-		return nil, "", "", err
+		return nil, messagePageInfo{}, "", "", err
 	}
 	if includeMediaPathsForMessages(a) {
 		if err := s.enrichMessageMediaResources(rows); err != nil {
-			return nil, "", "", err
+			return nil, messagePageInfo{}, "", "", err
 		}
 	}
 	displayOrder, err := messagesDisplayOrder(a)
 	if err != nil {
-		return nil, "", "", err
+		return nil, messagePageInfo{}, "", "", err
 	}
 	applyMessageDisplayOrder(rows, displayOrder)
-	return rows, queryOrder, displayOrder, nil
+	page.Returned = len(rows)
+	if page.HasMore {
+		page.NextOffset = page.Offset + page.Returned
+	}
+	return rows, page, queryOrder, displayOrder, nil
 }
 
 func chatTimelineMessageArgs(a map[string]any) map[string]any {
@@ -704,21 +773,29 @@ func copyToolArgs(a map[string]any) map[string]any {
 	return out
 }
 
-func chatTimelineEnvelope(args map[string]any, rows []wcdb.Row, messages []map[string]any, queryOrder, displayOrder string) map[string]any {
+func messageTimelineEnvelope(args map[string]any, rows []wcdb.Row, messages []map[string]any, page messagePageInfo, queryOrder, displayOrder string) map[string]any {
 	return compactMap(map[string]any{
-		"query":     chatTimelineQueryMeta(args, rows, queryOrder, displayOrder, len(messages)),
+		"query":     chatTimelineQueryMeta(args, rows, page, queryOrder, displayOrder, len(messages)),
 		"freshness": chatTimelineFreshnessMeta(args, rows),
 		"messages":  messages,
 	})
 }
 
-func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, queryOrder, displayOrder string, returned int) map[string]any {
+func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePageInfo, queryOrder, displayOrder string, returned int) map[string]any {
+	limit := page.Limit
+	if limit == 0 {
+		limit = getInt(args, "limit", 50)
+	}
+	offset := page.Offset
+	if offset == 0 {
+		offset = getInt(args, "offset", 0)
+	}
 	meta := compactMap(map[string]any{
 		"chat":          getStr(args, "chat"),
 		"talker":        firstNonEmpty(rowString(firstRow(rows), "talker"), getStr(args, "talker")),
 		"display_name":  rowString(firstRow(rows), "talker_display_name"),
-		"limit":         getInt(args, "limit", 50),
-		"offset":        getInt(args, "offset", 0),
+		"limit":         limit,
+		"offset":        offset,
 		"order":         normalizeOrderArg(getStr(args, "order")),
 		"display_order": displayOrder,
 		"after":         getStr(args, "after"),
@@ -734,7 +811,13 @@ func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, queryOrder, dis
 	if meta["display_order"] == "" {
 		meta["display_order"] = "query"
 	}
+	meta["limit"] = limit
+	meta["offset"] = offset
 	meta["returned"] = returned
+	meta["has_more"] = page.HasMore
+	if page.HasMore {
+		meta["next_offset"] = page.NextOffset
+	}
 	if oldest, newest := messageTimeBounds(rows); oldest != "" || newest != "" {
 		meta["oldest_time"] = oldest
 		meta["newest_time"] = newest
@@ -857,21 +940,21 @@ func applyMessageDisplayOrder(rows []wcdb.Row, order string) {
 	})
 }
 
-func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, error) {
+func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, messagePageInfo, error) {
 	talker, err := s.resolveLooseChatArg(a)
 	if err != nil {
-		return nil, err
+		return nil, messagePageInfo{}, err
 	}
 	if talker == "" {
-		return nil, fmt.Errorf("talker or chat is required")
+		return nil, messagePageInfo{}, fmt.Errorf("talker or chat is required")
 	}
 	if aggregatorSessions[talker] {
-		return nil, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
+		return nil, messagePageInfo{}, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
 	}
 	tableName := "Msg_" + talkerHash(talker)
 	shards, err := s.findMsgDBs(tableName)
 	if err != nil {
-		return nil, err
+		return nil, messagePageInfo{}, err
 	}
 	defer closeMsgDBs(shards)
 
@@ -879,7 +962,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	if senderArg := getStr(a, "sender"); senderArg != "" {
 		resolved, err := s.resolveLooseSenderArg(a)
 		if err != nil {
-			return nil, err
+			return nil, messagePageInfo{}, err
 		}
 		sender = resolved
 	}
@@ -889,7 +972,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	if s := getStr(a, "after"); s != "" {
 		ts, err := parseTS(s)
 		if err != nil {
-			return nil, err
+			return nil, messagePageInfo{}, err
 		}
 		where = append(where, "create_time >= ?")
 		args = append(args, ts)
@@ -897,7 +980,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	if s := getStr(a, "before"); s != "" {
 		ts, err := parseTS(s)
 		if err != nil {
-			return nil, err
+			return nil, messagePageInfo{}, err
 		}
 		where = append(where, "create_time < ?")
 		args = append(args, ts)
@@ -909,7 +992,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	if kind := firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type")); kind != "" {
 		kwc, kargs, err := messageKindWhere(kind, "local_type")
 		if err != nil {
-			return nil, err
+			return nil, messagePageInfo{}, err
 		}
 		where = append(where, kwc)
 		args = append(args, kargs...)
@@ -919,10 +1002,15 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	}
 	limit := getInt(a, "limit", 50)
 	offset := getInt(a, "offset", 0)
+	page := messagePageInfo{Limit: limit, Offset: offset}
+	fetchLimit := limit
+	if fetchLimit > 0 {
+		fetchLimit++
+	}
 	kw := getStr(a, "keyword")
-	sqlLimit := limit + offset
+	sqlLimit := fetchLimit + offset
 	if sqlLimit <= 0 {
-		sqlLimit = limit
+		sqlLimit = fetchLimit
 	}
 	if kw != "" {
 		sqlLimit = 5000
@@ -962,7 +1050,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 			ORDER BY %s
 			LIMIT ? OFFSET ?`, quoteIdent(tableName), shardWC, order), shardArgs...)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", shard.Name, err)
+			return nil, messagePageInfo{}, fmt.Errorf("%s: %w", shard.Name, err)
 		}
 		if n2i != nil {
 			shardRows = resolveSenders(shardRows, n2i)
@@ -979,7 +1067,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		rows = append(rows, shardRows...)
 	}
 	if !senderSeen {
-		return []wcdb.Row{}, nil
+		return []wcdb.Row{}, page, nil
 	}
 	sortLiveMessageRows(rows, order)
 	if kw != "" {
@@ -996,12 +1084,16 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		} else {
 			filtered = nil
 		}
-		if len(filtered) > limit {
+		if fetchLimit > 0 && len(filtered) > fetchLimit {
+			filtered = filtered[:fetchLimit]
+		}
+		if limit > 0 && len(filtered) > limit {
+			page.HasMore = true
 			filtered = filtered[:limit]
 		}
 		rows = filtered
 	} else {
-		rows = sliceRows(rows, offset, limit)
+		rows, page.HasMore = sliceRowsWithHasMore(rows, offset, limit)
 	}
 	s.attachDisplayNames(rows,
 		[2]string{"talker", "talker_display_name"},
@@ -1022,7 +1114,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		delete(r, "source")
 		delete(r, "local_type")
 	}
-	return rows, nil
+	return rows, page, nil
 }
 
 func sortLiveMessageRows(rows []wcdb.Row, order string) {
@@ -1055,17 +1147,22 @@ func sortLiveMessageRows(rows []wcdb.Row, order string) {
 }
 
 func sliceRows(rows []wcdb.Row, offset, limit int) []wcdb.Row {
+	out, _ := sliceRowsWithHasMore(rows, offset, limit)
+	return out
+}
+
+func sliceRowsWithHasMore(rows []wcdb.Row, offset, limit int) ([]wcdb.Row, bool) {
 	if offset < 0 {
 		offset = 0
 	}
 	if offset >= len(rows) {
-		return nil
+		return nil, false
 	}
 	rows = rows[offset:]
 	if limit >= 0 && len(rows) > limit {
-		rows = rows[:limit]
+		return rows[:limit], true
 	}
-	return rows
+	return rows, false
 }
 
 // liteMessages strips raw XML / parsed / source / housekeeping fields when
@@ -1159,13 +1256,18 @@ func agentMessages(rows []wcdb.Row, includeDebugOpt ...bool) []map[string]any {
 		includeDebug = includeDebugOpt[0]
 	}
 	out := make([]map[string]any, 0, len(rows))
+	index := agentSourceMessageIndex(rows)
 	for _, r := range rows {
-		out = append(out, agentMessage(r, includeDebug))
+		out = append(out, agentMessageWithIndex(r, index, includeDebug))
 	}
 	return out
 }
 
 func agentMessage(r wcdb.Row, includeDebugOpt ...bool) map[string]any {
+	return agentMessageWithIndex(r, nil, includeDebugOpt...)
+}
+
+func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeDebugOpt ...bool) map[string]any {
 	includeDebug := false
 	if len(includeDebugOpt) > 0 {
 		includeDebug = includeDebugOpt[0]
@@ -1173,6 +1275,8 @@ func agentMessage(r wcdb.Row, includeDebugOpt ...bool) map[string]any {
 	out := map[string]any{
 		"id":          agentMessageID(r),
 		"time":        agentMessageTime(r),
+		"create_time": rowInt64(r, "create_time"),
+		"time_iso":    agentMessageTimeISO(r),
 		"sender":      agentMessageSender(r),
 		"sender_wxid": rowString(r, "sender_wxid"),
 		"is_from_me":  r["is_from_me"],
@@ -1206,16 +1310,63 @@ func agentMessage(r wcdb.Row, includeDebugOpt ...bool) map[string]any {
 			out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
 		}
 	}
-	if quote := agentQuote(r); len(quote) > 0 {
+	if quote := agentQuote(r, sourceIndex); len(quote) > 0 {
 		out["quote"] = quote
 	}
-	attachAgentStructuredPayloads(out, r)
+	attachAgentStructuredPayloads(out, r, sourceIndex)
 	if includeDebug {
 		if debug := agentDebugFields(r); len(debug) > 0 {
 			out["debug"] = debug
 		}
 	}
 	return compactMap(out)
+}
+
+func agentSourceMessageIndex(rows []wcdb.Row) map[string]wcdb.Row {
+	index := map[string]wcdb.Row{}
+	for _, r := range rows {
+		for _, key := range agentSourceMessageKeys(
+			rowString(r, "talker"),
+			rowInt64(r, "local_id"),
+			rowString(r, "server_id_str"),
+			rowInt64(r, "server_id"),
+		) {
+			index[key] = r
+		}
+	}
+	if len(index) == 0 {
+		return nil
+	}
+	return index
+}
+
+func agentSourceMessageKeys(talker string, localID int64, serverIDStr string, serverID int64) []string {
+	var keys []string
+	if talker != "" && localID != 0 {
+		keys = append(keys, "talker:"+talker+"\x00local:"+strconv.FormatInt(localID, 10))
+	}
+	if serverIDStr == "" && serverID != 0 {
+		serverIDStr = strconv.FormatInt(serverID, 10)
+	}
+	if serverIDStr != "" {
+		keys = append(keys, "server:"+serverIDStr)
+		if talker != "" {
+			keys = append(keys, "talker:"+talker+"\x00server:"+serverIDStr)
+		}
+	}
+	return keys
+}
+
+func lookupAgentSourceMessage(index map[string]wcdb.Row, talker string, localID int64, serverIDStr string, serverID int64) wcdb.Row {
+	if len(index) == 0 {
+		return nil
+	}
+	for _, key := range agentSourceMessageKeys(talker, localID, serverIDStr, serverID) {
+		if r := index[key]; r != nil {
+			return r
+		}
+	}
+	return nil
 }
 
 func agentMessageID(r wcdb.Row) map[string]any {
@@ -1312,6 +1463,14 @@ func agentMessageTime(r wcdb.Row) string {
 	return ""
 }
 
+func agentMessageTimeISO(r wcdb.Row) string {
+	ts := rowInt64(r, "create_time")
+	if ts == 0 {
+		return ""
+	}
+	return time.Unix(ts, 0).Format(time.RFC3339)
+}
+
 func agentMessageSender(r wcdb.Row) string {
 	sender := firstNonEmpty(rowString(r, "sender_display_name"), rowString(r, "sender_wxid"))
 	if sender != "" {
@@ -1375,7 +1534,7 @@ func agentSystemText(raw string) string {
 	return raw
 }
 
-func agentQuote(r wcdb.Row) map[string]any {
+func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 	if rowString(r, "kind_name") != "quote" {
 		return nil
 	}
@@ -1415,6 +1574,8 @@ func agentQuote(r wcdb.Row) map[string]any {
 	}
 	if ts, ok := integerArgValue(refer["createtime"]); ok && ts != 0 {
 		quote["time"] = time.Unix(ts, 0).Format("2006-01-02 15:04:05")
+		quote["create_time"] = ts
+		quote["time_iso"] = time.Unix(ts, 0).Format(time.RFC3339)
 	}
 	if refParsed != nil {
 		refHints := refer["media_read_hints"]
@@ -1438,9 +1599,13 @@ func agentQuote(r wcdb.Row) map[string]any {
 		if ts, ok := integerArgValue(refer["createtime"]); ok {
 			refRow["create_time"] = ts
 		}
-		attachAgentStructuredPayloads(quote, refRow)
+		attachAgentStructuredPayloads(quote, refRow, sourceIndex)
 		attachAgentReferencedMediaRefs(quote, refRow)
 	}
+	if src := lookupAgentSourceMessage(sourceIndex, stringMapValue(refer, "chatusr"), 0, stringMapValue(refer, "svrid"), 0); src != nil {
+		attachAgentVisiblePayloadFromSource(quote, src)
+	}
+	pruneResolvedMediaWarnings(quote)
 	return compactMap(quote)
 }
 
@@ -1484,7 +1649,11 @@ func attachAgentReferencedMediaRefs(out map[string]any, r wcdb.Row) {
 	}
 }
 
-func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row) {
+func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row, sourceIndexOpt ...map[string]wcdb.Row) {
+	var sourceIndex map[string]wcdb.Row
+	if len(sourceIndexOpt) > 0 {
+		sourceIndex = sourceIndexOpt[0]
+	}
 	switch rowString(r, "kind_name") {
 	case "link", "channel_video":
 		if link := agentLinkPayload(r); len(link) > 0 {
@@ -1499,7 +1668,7 @@ func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row) {
 			out["miniprogram"] = mini
 		}
 	case "forward_chat":
-		if forward := agentForwardChatPayload(r); len(forward) > 0 {
+		if forward := agentForwardChatPayload(r, sourceIndex); len(forward) > 0 {
 			out["forward_chat"] = forward
 		}
 	case "transfer":
@@ -1549,6 +1718,95 @@ func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row) {
 	}
 }
 
+func attachAgentVisiblePayloadFromSource(out map[string]any, src wcdb.Row) {
+	if src == nil {
+		return
+	}
+	srcMsg := agentMessageWithIndex(src, nil)
+	for _, key := range []string{
+		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat",
+		"transfer", "red_packet", "location", "card", "voice", "video", "sticker",
+		"solitaire", "announcement", "pat",
+	} {
+		if key == "forward_chat" && rowString(src, "kind_name") == "forward_chat" && rowString(wcdb.Row(out), "kind") == "forward_chat" {
+			continue
+		}
+		if v, ok := srcMsg[key]; ok {
+			if shouldUseSourcePayload(out, key, v) {
+				out[key] = v
+			}
+		}
+	}
+	if sourceID, ok := srcMsg["id"].(map[string]any); ok && len(sourceID) > 0 {
+		out["source_id"] = sourceID
+	}
+	if warnings := stringSliceAny(srcMsg["warnings"]); len(warnings) > 0 {
+		out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+	}
+	pruneResolvedMediaWarnings(out)
+}
+
+func shouldUseSourcePayload(out map[string]any, key string, src any) bool {
+	current, exists := out[key]
+	if !exists {
+		return true
+	}
+	switch key {
+	case "images", "videos":
+		return len(mapSliceAny(current)) == 0 && len(mapSliceAny(src)) > 0
+	case "files":
+		return !filesHaveReadablePath(mapSliceAny(current)) && filesHaveReadablePath(mapSliceAny(src))
+	default:
+		return false
+	}
+}
+
+func pruneResolvedMediaWarnings(out map[string]any) {
+	warnings := stringSliceAny(out["warnings"])
+	if len(warnings) == 0 {
+		return
+	}
+	remove := map[string]bool{}
+	if len(mapSliceAny(out["images"])) > 0 {
+		for _, w := range []string{"image_available_only_as_wechat_cdn", "image_paths_not_direct_readable", "image_decode_needs_image_key", "forward_image_not_resolved"} {
+			remove[w] = true
+		}
+	}
+	if len(mapSliceAny(out["videos"])) > 0 {
+		for _, w := range []string{"video_paths_not_direct_readable", "forward_video_not_resolved"} {
+			remove[w] = true
+		}
+	}
+	if filesHaveReadablePath(mapSliceAny(out["files"])) {
+		for _, w := range []string{"file_paths_not_direct_readable", "forward_file_not_resolved"} {
+			remove[w] = true
+		}
+	}
+	if len(remove) == 0 {
+		return
+	}
+	var kept []string
+	for _, w := range warnings {
+		if !remove[w] {
+			kept = append(kept, w)
+		}
+	}
+	if len(kept) == 0 {
+		delete(out, "warnings")
+		return
+	}
+	out["warnings"] = kept
+}
+
+func filesHaveReadablePath(files []map[string]any) bool {
+	for _, f := range files {
+		if rowString(wcdb.Row(f), "path") != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func agentAppPayload(r wcdb.Row) map[string]any {
 	p, _ := r["message_content_parsed"].(map[string]any)
 	if p == nil {
@@ -1593,12 +1851,12 @@ func agentMiniprogramPayload(r wcdb.Row) map[string]any {
 	return p
 }
 
-func agentForwardChatPayload(r wcdb.Row) map[string]any {
+func agentForwardChatPayload(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 	p, _ := r["message_content_parsed"].(map[string]any)
 	if p == nil {
 		return nil
 	}
-	items := forwardItemsPayload(p["forward_items"], mapSliceAny(r["media_read_hints"]))
+	items := forwardItemsPayload(p["forward_items"], mapSliceAny(r["media_read_hints"]), sourceIndex)
 	return compactMap(map[string]any{
 		"title":       stringMapValue(p, "title"),
 		"description": stringMapValue(p, "des"),
@@ -1618,43 +1876,47 @@ func forwardItemCount(v any) int {
 	}
 }
 
-func forwardItemsPayload(v any, hints []map[string]any) []map[string]any {
-	return forwardItemsPayloadAt(v, nil, hints)
+func forwardItemsPayload(v any, hints []map[string]any, sourceIndex map[string]wcdb.Row) []map[string]any {
+	return forwardItemsPayloadAt(v, nil, hints, sourceIndex)
 }
 
-func forwardItemsPayloadAt(v any, prefix []int, hints []map[string]any) []map[string]any {
+func forwardItemsPayloadAt(v any, prefix []int, hints []map[string]any, sourceIndex map[string]wcdb.Row) []map[string]any {
 	var out []map[string]any
 	switch x := v.(type) {
 	case []wxparse.ForwardItem:
 		for i, it := range x {
-			out = append(out, forwardItemPayload(it, appendForwardPath(prefix, i), hints))
+			out = append(out, forwardItemPayload(it, appendForwardPath(prefix, i), hints, sourceIndex))
 		}
 	case []any:
 		for i, raw := range x {
 			if m, ok := raw.(map[string]any); ok {
-				out = append(out, forwardMapItemPayload(m, appendForwardPath(prefix, i), hints))
+				out = append(out, forwardMapItemPayload(m, appendForwardPath(prefix, i), hints, sourceIndex))
 			}
 		}
 	}
 	return out
 }
 
-func forwardItemPayload(it wxparse.ForwardItem, path []int, hints []map[string]any) map[string]any {
+func forwardItemPayload(it wxparse.ForwardItem, path []int, hints []map[string]any, sourceIndex map[string]wcdb.Row) map[string]any {
 	kind := forwardDataTypeKind(it.DataType)
 	item := compactMap(map[string]any{
-		"kind":                 kind,
-		"sender":               it.SourceName,
-		"time":                 it.SourceTime,
-		"text":                 forwardItemText(kind, it.DataDesc),
-		"title":                forwardItemTitle(kind, it.DataTitle, it.DataDesc),
-		"description":          forwardItemDescription(kind, it.DataDesc),
-		"source_create_time":   it.SrcMsgCreateTime,
-		"source_local_id":      it.SrcMsgLocalID,
-		"source_server_id_str": it.FromNewMsgID,
-		"message_uuid":         it.MessageUUID,
-		"parse_error":          it.ParseError,
+		"kind":        kind,
+		"sender":      it.SourceName,
+		"time":        it.SourceTime,
+		"create_time": it.SrcMsgCreateTime,
+		"text":        forwardItemText(kind, it.DataDesc),
+		"title":       forwardItemTitle(kind, it.DataTitle, it.DataDesc),
+		"description": forwardItemDescription(kind, it.DataDesc),
+		"source_id":   forwardSourceID("", it.SrcMsgLocalID, it.FromNewMsgID, it.MessageUUID),
+		"parse_error": it.ParseError,
 	})
+	if it.SrcMsgCreateTime != 0 {
+		item["time_iso"] = time.Unix(it.SrcMsgCreateTime, 0).Format(time.RFC3339)
+	}
 	addForwardItemTypedPayload(item, kind, it, path, hints)
+	if src := lookupAgentSourceMessage(sourceIndex, "", it.SrcMsgLocalID, it.FromNewMsgID, 0); src != nil {
+		attachAgentVisiblePayloadFromSource(item, src)
+	}
 	if it.ReferMsg != nil {
 		if quote := forwardReferMsgPayload(*it.ReferMsg); len(quote) > 0 {
 			item["quote"] = quote
@@ -1662,29 +1924,67 @@ func forwardItemPayload(it wxparse.ForwardItem, path []int, hints []map[string]a
 	}
 	if len(it.NestedItems) > 0 {
 		item["item_count"] = len(it.NestedItems)
-		item["items"] = forwardItemsPayloadAt(it.NestedItems, path, hints)
+		item["items"] = forwardItemsPayloadAt(it.NestedItems, path, hints, sourceIndex)
 	}
+	attachForwardItemMissingMediaWarnings(item, kind)
 	return item
 }
 
-func forwardMapItemPayload(m map[string]any, path []int, hints []map[string]any) map[string]any {
+func forwardMapItemPayload(m map[string]any, path []int, hints []map[string]any, sourceIndex map[string]wcdb.Row) map[string]any {
 	datatype := int(rowInt64(wcdb.Row(m), "datatype"))
 	kind := forwardDataTypeKind(datatype)
+	localID := rowInt64(wcdb.Row(m), "src_msg_localid")
+	serverIDStr := stringMapValue(m, "fromnewmsgid")
 	item := compactMap(map[string]any{
-		"kind":               kind,
-		"sender":             stringMapValue(m, "sourcename"),
-		"time":               stringMapValue(m, "sourcetime"),
-		"text":               forwardItemText(kind, stringMapValue(m, "datadesc")),
-		"title":              forwardItemTitle(kind, stringMapValue(m, "datatitle"), stringMapValue(m, "datadesc")),
-		"description":        forwardItemDescription(kind, stringMapValue(m, "datadesc")),
-		"source_create_time": m["src_msg_create_time"],
-		"source_local_id":    m["src_msg_localid"],
+		"kind":        kind,
+		"sender":      stringMapValue(m, "sourcename"),
+		"time":        stringMapValue(m, "sourcetime"),
+		"create_time": m["src_msg_create_time"],
+		"text":        forwardItemText(kind, stringMapValue(m, "datadesc")),
+		"title":       forwardItemTitle(kind, stringMapValue(m, "datatitle"), stringMapValue(m, "datadesc")),
+		"description": forwardItemDescription(kind, stringMapValue(m, "datadesc")),
+		"source_id":   forwardSourceID("", localID, serverIDStr, stringMapValue(m, "messageuuid")),
 	})
-	if nested := forwardItemsPayloadAt(m["nested_items"], path, hints); len(nested) > 0 {
+	if src := lookupAgentSourceMessage(sourceIndex, "", localID, serverIDStr, 0); src != nil {
+		attachAgentVisiblePayloadFromSource(item, src)
+	}
+	if nested := forwardItemsPayloadAt(m["nested_items"], path, hints, sourceIndex); len(nested) > 0 {
 		item["item_count"] = len(nested)
 		item["items"] = nested
 	}
+	attachForwardItemMissingMediaWarnings(item, kind)
 	return item
+}
+
+func forwardSourceID(talker string, localID int64, serverIDStr, messageUUID string) map[string]any {
+	return compactMap(map[string]any{
+		"talker":        talker,
+		"local_id":      localID,
+		"server_id_str": serverIDStr,
+		"message_uuid":  messageUUID,
+	})
+}
+
+func attachForwardItemMissingMediaWarnings(item map[string]any, kind string) {
+	var warning string
+	switch kind {
+	case "image":
+		if len(mapSliceAny(item["images"])) == 0 {
+			warning = "forward_image_not_resolved"
+		}
+	case "video":
+		if len(mapSliceAny(item["videos"])) == 0 {
+			warning = "forward_video_not_resolved"
+		}
+	case "file":
+		if !filesHaveReadablePath(mapSliceAny(item["files"])) {
+			warning = "forward_file_not_resolved"
+		}
+	}
+	if warning != "" {
+		item["warnings"] = appendUniqueStrings(stringSliceAny(item["warnings"]), warning)
+	}
+	pruneResolvedMediaWarnings(item)
 }
 
 func appendForwardPath(prefix []int, next int) []int {
@@ -2208,7 +2508,7 @@ func agentFilePaths(r wcdb.Row, referenced bool) ([]string, []string) {
 		return direct, nil
 	}
 	if len(local) > 0 {
-		return local[:1], []string{"file_paths_not_direct_readable"}
+		return nil, []string{"file_paths_not_direct_readable"}
 	}
 	if referenced {
 		return nil, nil
@@ -2227,7 +2527,7 @@ func agentFilePaths(r wcdb.Row, referenced bool) ([]string, []string) {
 		return direct, nil
 	}
 	if len(local) > 0 {
-		return local[:1], []string{"file_paths_not_direct_readable"}
+		return nil, []string{"file_paths_not_direct_readable"}
 	}
 	return nil, nil
 }
@@ -2284,7 +2584,7 @@ func agentMediaPathsByFamily(r wcdb.Row, referenced bool, family, unreadableWarn
 		return direct, nil
 	}
 	if len(local) > 0 {
-		return local[:1], []string{unreadableWarning}
+		return nil, []string{unreadableWarning}
 	}
 	if referenced {
 		return nil, nil
@@ -2300,7 +2600,7 @@ func agentMediaPathsByFamily(r wcdb.Row, referenced bool, family, unreadableWarn
 		return direct, nil
 	}
 	if len(local) > 0 {
-		return local[:1], []string{unreadableWarning}
+		return nil, []string{unreadableWarning}
 	}
 	return nil, nil
 }
@@ -2989,10 +3289,10 @@ func (s *server) toolMediaResources(a map[string]any) (any, error) {
 		return nil, err
 	}
 	s.attachDisplayNames(rows, [2]string{"talker", "talker_display_name"}, [2]string{"sender_wxid", "sender_display_name"})
-	return s.buildMediaResourceOutput(rows, getBoolDefault(a, "include_local_paths", true)), nil
+	return s.buildMediaResourceOutput(rows, getBoolDefault(a, "include_local_paths", true), includeDebugOutput(a)), nil
 }
 
-func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths bool) []map[string]any {
+func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths bool, includeDebug bool) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	byMessage := map[int64]int{}
 	self := s.selfWxid()
@@ -3052,7 +3352,136 @@ func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths boo
 			item["media_read_hints"] = hints
 		}
 	}
+	if !includeDebug {
+		agentReadyMediaResourceOutput(out)
+	}
 	return out
+}
+
+func agentReadyMediaResourceOutput(items []map[string]any) {
+	for _, item := range items {
+		row := wcdb.Row(item)
+		if images, warnings := agentImageRefs(row, false); len(images) > 0 || len(warnings) > 0 {
+			if len(images) > 0 {
+				item["images"] = images
+			}
+			if len(warnings) > 0 {
+				item["warnings"] = appendUniqueStrings(stringSliceAny(item["warnings"]), warnings...)
+			}
+		}
+		if videos, warnings := agentVideoRefs(row, false); len(videos) > 0 || len(warnings) > 0 {
+			if len(videos) > 0 {
+				item["videos"] = videos
+			}
+			if len(warnings) > 0 {
+				item["warnings"] = appendUniqueStrings(stringSliceAny(item["warnings"]), warnings...)
+			}
+		}
+		if files, warnings := agentFileRefs(row, false); len(files) > 0 || len(warnings) > 0 {
+			if len(files) > 0 {
+				item["files"] = files
+			}
+			if len(warnings) > 0 {
+				item["warnings"] = appendUniqueStrings(stringSliceAny(item["warnings"]), warnings...)
+			}
+		}
+
+		resources := mapSliceAny(item["resources"])
+		if len(resources) > 0 {
+			cleanResources := make([]map[string]any, 0, len(resources))
+			seenResourcePaths := map[string]bool{}
+			for _, res := range resources {
+				if clean := agentReadyMediaResource(res); len(clean) > 0 {
+					if path := rowString(wcdb.Row(clean), "path"); path != "" {
+						if seenResourcePaths[path] {
+							continue
+						}
+						seenResourcePaths[path] = true
+					}
+					cleanResources = append(cleanResources, clean)
+				}
+			}
+			if len(cleanResources) > 0 {
+				item["resources"] = cleanResources
+			} else {
+				delete(item, "resources")
+			}
+		}
+
+		for _, k := range []string{
+			"base_kind", "subtype", "message_origin_source", "message_packed_strings",
+			"media_local_paths", "media_local_path_uris", "media_read_hints", "resource_count",
+		} {
+			delete(item, k)
+		}
+	}
+}
+
+func agentReadyMediaResource(res map[string]any) map[string]any {
+	paths := agentReadyMediaResourcePaths(res)
+	out := map[string]any{}
+	if len(paths) > 0 {
+		out["path"] = paths[0]
+		for _, k := range []string{"size", "md5", "content_md5", "file_name", "file_names"} {
+			if v, ok := res[k]; ok {
+				out[k] = v
+			}
+		}
+	}
+	if warnings := agentReadyMediaResourceWarnings(res, paths); len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	return compactMap(out)
+}
+
+func agentReadyMediaResourcePaths(res map[string]any) []string {
+	family := rowString(wcdb.Row(res), "resource_family")
+	var paths []string
+	for _, p := range stringSliceAny(res["direct_readable_local_paths"]) {
+		if directReadableMediaPath(family, p) {
+			paths = appendUniqueStrings(paths, p)
+		}
+	}
+	for _, p := range stringSliceAny(res["decoded_local_paths"]) {
+		if directReadableMediaPath(family, p) {
+			paths = appendUniqueStrings(paths, p)
+		}
+	}
+	for _, p := range stringSliceAny(res["local_paths"]) {
+		if directReadableMediaPath(family, p) {
+			paths = appendUniqueStrings(paths, p)
+		}
+	}
+	return paths
+}
+
+func agentReadyMediaResourceWarnings(res map[string]any, readablePaths []string) []string {
+	if len(readablePaths) > 0 {
+		return nil
+	}
+	family := rowString(wcdb.Row(res), "resource_family")
+	localPaths := stringSliceAny(res["local_paths"])
+	var warnings []string
+	switch family {
+	case "image", "cover":
+		for _, d := range mapSliceAny(res["local_path_details"]) {
+			if rowString(wcdb.Row(d), "decode_status") == "needs_image_key" {
+				warnings = appendUniqueStrings(warnings, "image_decode_needs_image_key")
+			}
+		}
+		if len(localPaths) > 0 {
+			warnings = appendUniqueStrings(warnings, "image_paths_not_direct_readable")
+		}
+	case "video":
+		if len(localPaths) > 0 {
+			warnings = appendUniqueStrings(warnings, "video_paths_not_direct_readable")
+		}
+	case "file":
+		if len(localPaths) > 0 {
+			warnings = appendUniqueStrings(warnings, "file_paths_not_direct_readable")
+		}
+	}
+	return warnings
 }
 
 func (s *server) mediaResourceFromRow(r wcdb.Row, includeLocalPaths bool) map[string]any {
@@ -3371,20 +3800,72 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 	meta["v4_aes_size"] = aesSize
 	meta["v4_xor_size"] = xorSize
 	xorKey, source := deriveWechatV4XORKey(data, siblingPaths)
+	if source == "default" && s != nil && s.cfg != nil && s.cfg.ImageXORKey != nil && *s.cfg.ImageXORKey >= 0 && *s.cfg.ImageXORKey <= 255 {
+		xorKey = byte(*s.cfg.ImageXORKey)
+		source = "config"
+	}
 	meta["v4_xor_key"] = fmt.Sprintf("0x%02x", xorKey)
 	meta["v4_xor_key_source"] = source
 
 	var keys []imageKeyCandidate
+	usesDynamicImageKey := false
 	if bytes.Equal(data[:len(wechatV4ImageHeader1)], wechatV4ImageHeader1) {
 		keys = []imageKeyCandidate{{key: wechatV4FixedAESKey, source: "format1_fixed"}}
 	} else {
+		usesDynamicImageKey = true
 		keys = s.imageKeyCandidates()
 		if len(keys) == 0 {
-			meta["v4_key_source"] = "missing"
-			return nil, "", meta, "needs_image_key", fmt.Errorf("WeChat v4 image .dat requires image_key; set config image_key or WX_MCP_IMAGE_KEY")
+			if s.refreshImageKeyForDecode(meta, "missing WeChat V4 image_key", false) {
+				keys = s.imageKeyCandidates()
+			}
+			if len(keys) == 0 {
+				meta["v4_key_source"] = "missing"
+				return nil, "", meta, "needs_image_key", fmt.Errorf("WeChat v4 image .dat requires image_key; wx-mcp could not refresh it automatically")
+			}
 		}
 	}
 
+	decoded, ext, source, lastErr := tryDecodeWechatV4WithImageKeys(data, xorKey, keys)
+	if lastErr == nil {
+		meta["v4_key_source"] = source
+		if ext == "wxgf" {
+			return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+		}
+		return decoded, ext, meta, "decoded", nil
+	}
+	if usesDynamicImageKey && strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")) == "" && s.refreshImageKeyForDecode(meta, "configured WeChat V4 image_key failed", true) {
+		keys = s.imageKeyCandidates()
+		decoded, ext, source, lastErr = tryDecodeWechatV4WithImageKeys(data, xorKey, keys)
+		if lastErr == nil {
+			meta["v4_key_source"] = source
+			if ext == "wxgf" {
+				return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+			}
+			return decoded, ext, meta, "decoded", nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("image_key did not decrypt the image")
+	}
+	meta["v4_key_source"] = "config_or_env"
+	return nil, "", meta, "decode_failed", lastErr
+}
+
+func (s *server) refreshImageKeyForDecode(meta map[string]any, reason string, force bool) bool {
+	if s == nil {
+		meta["image_key_refresh"] = "unavailable"
+		return false
+	}
+	if err := s.refreshImageKeyFromWxkey(reason, force); err != nil {
+		meta["image_key_refresh"] = "failed"
+		meta["image_key_refresh_error"] = err.Error()
+		return false
+	}
+	meta["image_key_refresh"] = "ok"
+	return true
+}
+
+func tryDecodeWechatV4WithImageKeys(data []byte, xorKey byte, keys []imageKeyCandidate) ([]byte, string, string, error) {
 	var lastErr error
 	for _, cand := range keys {
 		decoded, err := decodeWechatV4ImageData(data, cand.key, xorKey)
@@ -3397,17 +3878,12 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 			lastErr = fmt.Errorf("unknown image type after decryption: %x", decoded[:minInt(len(decoded), 6)])
 			continue
 		}
-		meta["v4_key_source"] = cand.source
-		if ext == "wxgf" {
-			return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
-		}
-		return decoded, ext, meta, "decoded", nil
+		return decoded, ext, cand.source, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("image_key did not decrypt the image")
 	}
-	meta["v4_key_source"] = "config_or_env"
-	return nil, "", meta, "decode_failed", lastErr
+	return nil, "", "", lastErr
 }
 
 func decodeWechatV4ImageData(data, aesKey []byte, xorKey byte) ([]byte, error) {
@@ -3495,21 +3971,41 @@ type imageKeyCandidate struct {
 }
 
 func (s *server) imageKeyCandidates() []imageKeyCandidate {
-	raw := strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY"))
-	source := "env"
-	if raw == "" && s != nil && s.cfg != nil {
-		raw = strings.TrimSpace(s.cfg.ImageKey)
-		source = "config"
+	type rawKey struct {
+		value  string
+		source string
 	}
-	if raw == "" {
+	var raws []rawKey
+	if raw := strings.TrimSpace(os.Getenv("WX_MCP_IMAGE_KEY")); raw != "" {
+		raws = append(raws, rawKey{value: raw, source: "env"})
+	}
+	if s != nil && s.cfg != nil {
+		if raw := strings.TrimSpace(s.cfg.ImageKey); raw != "" {
+			raws = append(raws, rawKey{value: raw, source: "config"})
+		}
+	}
+	if len(raws) == 0 {
 		return nil
 	}
 	var out []imageKeyCandidate
-	if len(raw) >= aes.BlockSize {
-		out = append(out, imageKeyCandidate{key: []byte(raw[:aes.BlockSize]), source: source + "_raw"})
-	}
-	if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) >= aes.BlockSize {
-		out = append(out, imageKeyCandidate{key: decoded[:aes.BlockSize], source: source + "_hex"})
+	seen := map[string]bool{}
+	for _, rk := range raws {
+		if len(rk.value) >= aes.BlockSize {
+			key := []byte(rk.value[:aes.BlockSize])
+			id := string(key)
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, imageKeyCandidate{key: key, source: rk.source + "_raw"})
+			}
+		}
+		if decoded, err := hex.DecodeString(rk.value); err == nil && len(decoded) >= aes.BlockSize {
+			key := decoded[:aes.BlockSize]
+			id := string(key)
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, imageKeyCandidate{key: key, source: rk.source + "_hex"})
+			}
+		}
 	}
 	return out
 }

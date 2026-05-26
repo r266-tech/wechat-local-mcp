@@ -98,6 +98,8 @@ if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 
 Copy-Item -LiteralPath $WcdbLib -Destination (Join-Path $dist "libWCDB.dll") -Force
 Copy-Item README.md, llms.txt, LICENSE, SECURITY.md, THIRD_PARTY_NOTICES.md, AGENTS.md, mcp-server.json, install.ps1 -Destination $dist -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $dist "scripts") | Out-Null
+Copy-Item -LiteralPath (Join-Path $SourceDir "scripts\install-release.ps1") -Destination (Join-Path $dist "scripts\install-release.ps1") -Force
 if (Test-Path (Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $dist "docs") | Out-Null
   Copy-Item -LiteralPath (Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md") -Destination (Join-Path $dist "docs\WINDOWS_USER_GUIDE.md") -Force

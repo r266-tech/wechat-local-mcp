@@ -48,6 +48,46 @@ function Write-Log([string]$text) {
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
   Add-Content -Path $log -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString("o")), $text)
 }
+function Write-HumanResult($Out) {
+  Write-Host ""
+  if ($Out.errors.Count -gt 0) {
+    Write-Host "wx-mcp $($Out.mode) failed"
+  } else {
+    Write-Host "wx-mcp $($Out.mode) complete"
+  }
+  Write-Host "  status: $($Out.status)"
+  Write-Host "  install_dir: $($Out.install_dir)"
+  if (-not [string]::IsNullOrWhiteSpace($Out.blocked_by)) {
+    Write-Host "  blocked_by: $($Out.blocked_by)"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($Out.next_action)) {
+    Write-Host "  next: $($Out.next_action)"
+  }
+  if ($Out.mcp_registered_clients.Count -gt 0) {
+    Write-Host "  mcp_registered: $($Out.mcp_registered_clients -join ', ')"
+  } elseif (-not $NoMcp -and $McpClient -ne "none") {
+    Write-Host "  mcp_registered: no supported client command found"
+  }
+  if ($Out.refresh_ran) {
+    Write-Host "  metadata_cache: complete"
+  }
+  if ($Out.warnings.Count -gt 0) {
+    Write-Host "  warnings:"
+    foreach ($warning in $Out.warnings) {
+      Write-Host "    - $warning"
+    }
+  }
+  if ($Out.errors.Count -gt 0) {
+    Write-Host "  errors:"
+    foreach ($err in $Out.errors) {
+      Write-Host "    - $err"
+    }
+  }
+  if ($Out.errors.Count -eq 0 -and -not $DryRun -and $Out.mode -in @("install", "update")) {
+    Write-Host ""
+    Write-Host "Next: open Claude/Codex and call the wx-mcp sessions tool to verify end-to-end access."
+  }
+}
 function Finish {
   param([int]$Code = 0)
   $out = [ordered]@{
@@ -72,7 +112,7 @@ function Finish {
   if ($Json) {
     $out | ConvertTo-Json -Depth 8 -Compress
   } else {
-    $out | ConvertTo-Json -Depth 8
+    Write-HumanResult $out
   }
   exit $Code
 }

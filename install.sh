@@ -170,10 +170,53 @@ emit_json() {
   print "}"
 }
 
+print_human_result() {
+  local ok="$1"
+  print
+  if [[ "$ok" == "true" ]]; then
+    print "wx-mcp $MODE complete"
+  else
+    print "wx-mcp $MODE failed"
+  fi
+  print "  status: $INSTALL_STATUS"
+  print "  install_dir: $INSTALL_DIR"
+  [[ -n "$BLOCKED_BY" ]] && print "  blocked_by: $BLOCKED_BY"
+  [[ -n "$NEXT_ACTION" ]] && print "  next: $NEXT_ACTION"
+  if [[ "${#MCP_REGISTERED_CLIENTS[@]}" -gt 0 ]]; then
+    print "  mcp_registered: ${(j:, :)MCP_REGISTERED_CLIENTS}"
+  elif [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" ]]; then
+    print "  mcp_registered: no supported client command found"
+  fi
+  [[ "$BOOTSTRAP_RAN" -eq 1 ]] && print "  key_setup: complete"
+  [[ "$REFRESH_RAN" -eq 1 ]] && print "  metadata_cache: started"
+  [[ "$WATCHER_INSTALLED" -eq 1 ]] && print "  watcher: installed"
+  if [[ "${#WARNINGS[@]}" -gt 0 ]]; then
+    print "  warnings:"
+    local warning
+    for warning in "${WARNINGS[@]}"; do
+      print "    - $warning"
+    done
+  fi
+  if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
+    print
+    print "Next: open Claude/Codex and call the wx-mcp sessions tool to verify end-to-end access."
+    print "macOS quiet mode: add $INSTALL_DIR/wx-mcp and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
+  fi
+}
+
 finish() {
   local ok="$1"
   if [[ "$JSON" -eq 1 ]]; then
     emit_json "$ok"
+  else
+    print_human_result "$ok"
+  fi
+}
+
+mark_dry_run_result() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    INSTALL_STATUS="dry_run"
+    [[ -n "$NEXT_ACTION" ]] || NEXT_ACTION="Dry run only; rerun without --dry-run to apply changes."
   fi
 }
 
@@ -848,11 +891,13 @@ main() {
     uninstall)
       confirm_or_die
       uninstall
+      mark_dry_run_result
       finish true
       ;;
     clear-state)
       confirm_or_die
       clear_state
+      mark_dry_run_result
       finish true
       ;;
     install)
@@ -863,6 +908,7 @@ main() {
       run_bootstrap
       run_cache_refresh
       install_watcher
+      mark_dry_run_result
       finish true
       ;;
     update)
@@ -874,6 +920,7 @@ main() {
       run_bootstrap
       run_cache_refresh
       install_watcher
+      mark_dry_run_result
       finish true
       ;;
     *)

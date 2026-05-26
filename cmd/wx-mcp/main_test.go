@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/md5"
 	"encoding/binary"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/r266-tech/wechat-local-mcp/internal/config"
 	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
+	"github.com/r266-tech/wechat-local-mcp/internal/wxkey"
 	"github.com/r266-tech/wechat-local-mcp/internal/wxparse"
 )
 
@@ -248,6 +250,7 @@ func TestAgentMessagesFlattensImagesAndQuotes(t *testing.T) {
 			"talker":              "45428231044@chatroom",
 			"local_id":            int64(682),
 			"server_id_str":       "2369251559671996886",
+			"create_time":         int64(1779433702),
 			"create_time_human":   "2026-05-22 15:08:22",
 			"sender_display_name": "V",
 			"sender_wxid":         "wxid_v",
@@ -305,6 +308,9 @@ func TestAgentMessagesFlattensImagesAndQuotes(t *testing.T) {
 	if got[0]["sender_wxid"] != "wxid_v" || got[0]["is_from_me"] != true {
 		t.Fatalf("sender identity = %#v/%#v", got[0]["sender_wxid"], got[0]["is_from_me"])
 	}
+	if got[0]["create_time"] != int64(1779433702) || got[0]["time_iso"] == "" {
+		t.Fatalf("machine time = %#v/%#v", got[0]["create_time"], got[0]["time_iso"])
+	}
 	images, ok := got[0]["images"].([]map[string]any)
 	if !ok || len(images) != 1 || images[0]["path"] != "/tmp/direct.png" || len(images[0]) != 1 {
 		t.Fatalf("agent image paths = %#v, want direct path only", got[0]["images"])
@@ -322,6 +328,73 @@ func TestAgentMessagesFlattensImagesAndQuotes(t *testing.T) {
 	quoteImages, ok := quote["images"].([]map[string]any)
 	if !ok || len(quoteImages) != 1 || quoteImages[0]["path"] != "/tmp/quoted.png" {
 		t.Fatalf("quote images = %#v, want quoted image path", quote["images"])
+	}
+}
+
+func TestAgentMessagesReusesWindowMediaForQuotes(t *testing.T) {
+	rows := []wcdb.Row{
+		{
+			"talker":              "room@chatroom",
+			"local_id":            int64(13),
+			"server_id_str":       "6141378114596572979",
+			"create_time":         int64(1779442793),
+			"kind_name":           "file",
+			"content_summary":     "paper.pdf",
+			"sender_display_name": "V",
+			"media_read_hints": []map[string]any{{
+				"source":                      "message_resource",
+				"address_type":                "local_file",
+				"resource_family":             "file",
+				"direct_readable_local_paths": []string{"/tmp/paper.pdf"},
+				"local_path_details": []map[string]any{{
+					"path":      "/tmp/paper.pdf",
+					"file_size": int64(1234),
+				}},
+			}},
+			"media_resources": []map[string]any{{
+				"resource_family": "file",
+				"file_name":       "paper.pdf",
+			}},
+		},
+		{
+			"talker":              "room@chatroom",
+			"local_id":            int64(28),
+			"server_id_str":       "785813827353786291",
+			"create_time":         int64(1779443506),
+			"sender_display_name": "Bob",
+			"kind_name":           "quote",
+			"content_summary":     "[引用: paper.pdf] 值得学习",
+			"message_content_parsed": map[string]any{
+				"title": "值得学习",
+				"refermsg": map[string]any{
+					"type":        49,
+					"createtime":  int64(1779442793),
+					"displayname": "V",
+					"svrid":       "6141378114596572979",
+					"content_raw": "<msg><appmsg><type>6</type><title>paper.pdf</title></appmsg></msg>",
+					"content_parsed": map[string]any{
+						"app_subtype": int64(6),
+						"title":       "paper.pdf",
+						"app_attach": map[string]any{
+							"file_name": "paper.pdf",
+							"file_ext":  "pdf",
+							"total_len": int64(1234),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got := agentMessages(rows)
+	quote := got[1]["quote"].(map[string]any)
+	files := quote["files"].([]map[string]any)
+	if len(files) != 1 || files[0]["path"] != "/tmp/paper.pdf" || files[0]["readable"] == false {
+		t.Fatalf("quote files = %#v, want readable file path from source message", files)
+	}
+	sourceID := quote["source_id"].(map[string]any)
+	if sourceID["local_id"] != int64(13) || sourceID["server_id_str"] != "6141378114596572979" {
+		t.Fatalf("quote source_id = %#v", sourceID)
 	}
 }
 
@@ -350,6 +423,117 @@ func TestAgentMessagesWarnsOnRawImageFallback(t *testing.T) {
 	warnings, ok := got[0]["warnings"].([]string)
 	if !ok || len(warnings) != 2 || warnings[0] != "image_decode_needs_image_key" || warnings[1] != "image_paths_not_direct_readable" {
 		t.Fatalf("warnings = %#v, want concise decode + readability warnings", got[0]["warnings"])
+	}
+}
+
+func TestAgentReadyMediaResourcesExposeOnlyReadableImagePath(t *testing.T) {
+	items := []map[string]any{{
+		"kind_name":             "image",
+		"base_kind":             int64(3),
+		"message_origin_source": int64(1),
+		"media_local_paths":     []string{"/tmp/raw.dat", "/tmp/decoded.png"},
+		"media_read_hints": []map[string]any{{
+			"source":                      "message_resource",
+			"address_type":                "local_file",
+			"resource_family":             "image",
+			"direct_readable":             true,
+			"direct_readable_local_paths": []string{"/tmp/decoded.png"},
+			"local_paths":                 []string{"/tmp/raw.dat", "/tmp/decoded.png"},
+			"local_path_details": []map[string]any{{
+				"path":          "/tmp/raw.dat",
+				"decode_status": "decoded",
+				"decoded_path":  "/tmp/decoded.png",
+			}},
+		}},
+		"resources": []map[string]any{{
+			"resource_id":                 int64(11),
+			"resource_family":             "image",
+			"resource_type_raw":           int64(65537),
+			"variant_code":                int64(1),
+			"size":                        int64(123),
+			"status":                      int64(1),
+			"direct_readable":             true,
+			"direct_readable_local_paths": []string{"/tmp/decoded.png"},
+			"local_paths":                 []string{"/tmp/raw.dat", "/tmp/decoded.png"},
+			"local_path_details": []map[string]any{{
+				"path":          "/tmp/raw.dat",
+				"decode_status": "decoded",
+				"decoded_path":  "/tmp/decoded.png",
+			}},
+		}},
+	}}
+
+	agentReadyMediaResourceOutput(items)
+	images, ok := items[0]["images"].([]map[string]any)
+	if !ok || len(images) != 1 || images[0]["path"] != "/tmp/decoded.png" || len(images[0]) != 1 {
+		t.Fatalf("images = %#v, want single readable path", items[0]["images"])
+	}
+	for _, key := range []string{"media_local_paths", "media_read_hints", "base_kind", "message_origin_source"} {
+		if _, ok := items[0][key]; ok {
+			t.Fatalf("agent-ready media item leaked %s: %#v", key, items[0])
+		}
+	}
+	resources, ok := items[0]["resources"].([]map[string]any)
+	if !ok || len(resources) != 1 {
+		t.Fatalf("resources = %#v, want one resource", items[0]["resources"])
+	}
+	if resources[0]["path"] != "/tmp/decoded.png" {
+		t.Fatalf("resource summary = %#v, want readable path", resources[0])
+	}
+	for _, key := range []string{"local_paths", "local_path_details", "resource_type_raw", "variant_code", "resource_id", "resource_family", "status", "direct_readable", "paths"} {
+		if _, ok := resources[0][key]; ok {
+			t.Fatalf("agent-ready resource leaked %s: %#v", key, resources[0])
+		}
+	}
+}
+
+func TestAgentReadyMediaResourcesHideUnreadableImageDAT(t *testing.T) {
+	items := []map[string]any{{
+		"kind_name":         "image",
+		"media_local_paths": []string{"/tmp/raw.dat"},
+		"media_read_hints": []map[string]any{{
+			"source":          "message_resource",
+			"address_type":    "local_file",
+			"resource_family": "image",
+			"direct_readable": false,
+			"local_paths":     []string{"/tmp/raw.dat"},
+			"local_path_details": []map[string]any{{
+				"path":          "/tmp/raw.dat",
+				"decode_status": "needs_image_key",
+			}},
+		}},
+		"resources": []map[string]any{{
+			"resource_id":     int64(11),
+			"resource_family": "image",
+			"size":            int64(123),
+			"status":          int64(1),
+			"direct_readable": false,
+			"local_paths":     []string{"/tmp/raw.dat"},
+			"local_path_details": []map[string]any{{
+				"path":          "/tmp/raw.dat",
+				"decode_status": "needs_image_key",
+			}},
+		}},
+	}}
+
+	agentReadyMediaResourceOutput(items)
+	if _, ok := items[0]["images"]; ok {
+		t.Fatalf("unreadable .dat should not become image path: %#v", items[0]["images"])
+	}
+	warnings, ok := items[0]["warnings"].([]string)
+	if !ok || len(warnings) != 2 || warnings[0] != "image_decode_needs_image_key" || warnings[1] != "image_paths_not_direct_readable" {
+		t.Fatalf("item warnings = %#v, want missing key + unreadable path", items[0]["warnings"])
+	}
+	resources := items[0]["resources"].([]map[string]any)
+	if _, ok := resources[0]["path"]; ok {
+		t.Fatalf("unreadable resource leaked path: %#v", resources[0])
+	}
+	if _, ok := resources[0]["local_paths"]; ok {
+		t.Fatalf("unreadable resource leaked raw local_paths: %#v", resources[0])
+	}
+	resWarnings, ok := resources[0]["warnings"].([]string)
+	if !ok || len(resWarnings) != 2 || resWarnings[0] != "image_decode_needs_image_key" || resWarnings[1] != "image_paths_not_direct_readable" {
+		t.Fatalf("resource warnings = %#v, want missing key + unreadable path", resources[0]["warnings"])
 	}
 }
 
@@ -842,6 +1026,10 @@ func TestAgentForwardChatRecursivelyExposesNestedPayloads(t *testing.T) {
 	if len(images) != 1 || images[0]["path"] != "/tmp/forward-image.jpg" || len(images[0]) != 1 {
 		t.Fatalf("nested image = %#v", images[0])
 	}
+	sourceID := nested[0]["source_id"].(map[string]any)
+	if sourceID["server_id_str"] != "2369251559671996886" {
+		t.Fatalf("nested source_id = %#v", sourceID)
+	}
 	link := nested[1]["link"].(map[string]any)
 	if link["url"] != "https://mp.weixin.qq.com/s/test" || link["source"] != "AI寒武纪" {
 		t.Fatalf("nested link = %#v", link)
@@ -850,6 +1038,77 @@ func TestAgentForwardChatRecursivelyExposesNestedPayloads(t *testing.T) {
 	loc := quote["location"].(map[string]any)
 	if quote["kind"] != "location" || loc["name"] != "金顶" {
 		t.Fatalf("forward item quote = %#v", quote)
+	}
+}
+
+func TestAgentForwardChatWarnsWhenNestedMediaUnresolved(t *testing.T) {
+	rows := []wcdb.Row{{
+		"kind_name":       "forward_chat",
+		"content_summary": "群聊的聊天记录",
+		"message_content_parsed": map[string]any{
+			"title": "群聊的聊天记录",
+			"forward_items": []wxparse.ForwardItem{{
+				DataType:     2,
+				SourceName:   "V",
+				FromNewMsgID: "2369251559671996886",
+				FullMD5:      "12e8bd59b6f9b455803ae17225061090",
+			}},
+		},
+	}}
+
+	got := agentMessages(rows)
+	forward := got[0]["forward_chat"].(map[string]any)
+	items := forward["items"].([]map[string]any)
+	warnings := stringSliceAny(items[0]["warnings"])
+	if len(warnings) != 1 || warnings[0] != "forward_image_not_resolved" {
+		t.Fatalf("forward item warnings = %#v", items[0]["warnings"])
+	}
+}
+
+func TestAgentForwardChatSourceReuseDoesNotDuplicateNestedForward(t *testing.T) {
+	sourceForward := wcdb.Row{
+		"talker":        "room@chatroom",
+		"local_id":      int64(3),
+		"server_id_str": "745748254815614797",
+		"kind_name":     "forward_chat",
+		"message_content_parsed": map[string]any{
+			"title": "群聊的聊天记录",
+			"forward_items": []wxparse.ForwardItem{{
+				DataType:   1,
+				SourceName: "V",
+				DataDesc:   "hello",
+			}},
+		},
+	}
+	wrapper := wcdb.Row{
+		"talker":        "room@chatroom",
+		"local_id":      int64(30),
+		"server_id_str": "5634630697991999050",
+		"kind_name":     "forward_chat",
+		"message_content_parsed": map[string]any{
+			"title": "群聊的聊天记录",
+			"forward_items": []wxparse.ForwardItem{{
+				DataType:     17,
+				SourceName:   "V",
+				DataTitle:    "群聊的聊天记录",
+				FromNewMsgID: "745748254815614797",
+				NestedItems: []wxparse.ForwardItem{{
+					DataType:   1,
+					SourceName: "V",
+					DataDesc:   "hello",
+				}},
+			}},
+		},
+	}
+
+	got := agentMessages([]wcdb.Row{sourceForward, wrapper})
+	forward := got[1]["forward_chat"].(map[string]any)
+	items := forward["items"].([]map[string]any)
+	if _, ok := items[0]["forward_chat"]; ok {
+		t.Fatalf("nested forward item duplicated source forward_chat payload: %#v", items[0])
+	}
+	if nested := items[0]["items"].([]map[string]any); len(nested) != 1 || nested[0]["text"] != "hello" {
+		t.Fatalf("nested items = %#v", items[0]["items"])
 	}
 }
 
@@ -924,12 +1183,19 @@ func TestChatTimelineEnvelopeIncludesQueryAndFreshness(t *testing.T) {
 		{"talker": "room@chatroom", "talker_display_name": "AI Agent", "local_id": int64(2), "create_time": int64(200), "kind_name": "text", "content_summary": "new"},
 	}
 	msgs := agentMessages(rows)
-	env := chatTimelineEnvelope(map[string]any{"chat": "AI Agent", "limit": 2, "order": "desc"}, rows, msgs, "sort_seq DESC, local_id DESC", "asc")
+	env := messageTimelineEnvelope(
+		map[string]any{"chat": "AI Agent", "limit": 2, "order": "desc"},
+		rows,
+		msgs,
+		messagePageInfo{Limit: 2, Offset: 0, Returned: 2, HasMore: true, NextOffset: 2},
+		"sort_seq DESC, local_id DESC",
+		"asc",
+	)
 	if _, ok := env["messages"].([]map[string]any); !ok {
 		t.Fatalf("messages = %#v, want agent message rows", env["messages"])
 	}
 	query := env["query"].(map[string]any)
-	if query["chat"] != "AI Agent" || query["talker"] != "room@chatroom" || query["display_order"] != "asc" || query["returned"] != 2 {
+	if query["chat"] != "AI Agent" || query["talker"] != "room@chatroom" || query["display_order"] != "asc" || query["returned"] != 2 || query["has_more"] != true || query["next_offset"] != 2 {
 		t.Fatalf("query meta = %#v", query)
 	}
 	freshness := env["freshness"].(map[string]any)
@@ -1336,11 +1602,21 @@ func TestDecodeLocalImageForAgentWritesDecodedPath(t *testing.T) {
 }
 
 func TestDecodeLocalImageForAgentReportsMissingImageKey(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("WX_MCP_CONFIG", cfgPath)
 	root := t.TempDir()
 	key := []byte("abcdefghijklmnop")
 	img := filepath.Join(root, "sample.dat")
 	if err := os.WriteFile(img, testWechatV4ImageDAT(t, key, tinyPNG()), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if err := config.Save(&config.Config{DBRoot: root, Keys: map[string]string{"salt": "enc"}}); err != nil {
+		t.Fatal(err)
+	}
+	oldRunImageKey := runWxkeyImageKey
+	t.Cleanup(func() { runWxkeyImageKey = oldRunImageKey })
+	runWxkeyImageKey = func(rootArg string) (*wxkey.ImageKeyResult, string, error) {
+		return nil, "", os.ErrNotExist
 	}
 	srv := &server{cfg: &config.Config{DBRoot: root}}
 	res := map[string]any{}
@@ -1355,6 +1631,83 @@ func TestDecodeLocalImageForAgentReportsMissingImageKey(t *testing.T) {
 	}
 	if details[0]["decode_status"] != "needs_image_key" {
 		t.Fatalf("decode_status = %#v, want needs_image_key; detail=%#v", details[0]["decode_status"], details[0])
+	}
+}
+
+func TestDecodeLocalImageForAgentAutoRefreshesImageKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("WX_MCP_CONFIG", cfgPath)
+	root := t.TempDir()
+	key := []byte("abcdefghijklmnop")
+	img := filepath.Join(root, "msg", "attach", "hash", "2026-05", "Img", "sample.dat")
+	if err := os.MkdirAll(filepath.Dir(img), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(img, testWechatV4ImageDAT(t, key, tinyPNG()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Wxid:   "wxid_test",
+		DBRoot: root,
+		Keys:   map[string]string{"salt": "enc"},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	oldRunImageKey := runWxkeyImageKey
+	t.Cleanup(func() { runWxkeyImageKey = oldRunImageKey })
+	calls := 0
+	runWxkeyImageKey = func(rootArg string) (*wxkey.ImageKeyResult, string, error) {
+		calls++
+		if rootArg != root {
+			t.Fatalf("image-key root = %q, want %q", rootArg, root)
+		}
+		return &wxkey.ImageKeyResult{Key: hex.EncodeToString(key)}, "", nil
+	}
+	srv := &server{cfg: cfg, ok: true}
+	res := map[string]any{}
+	srv.attachLocalPathAgentFields(res, "image", []string{img})
+
+	if calls != 1 {
+		t.Fatalf("image-key refresh calls = %d, want 1", calls)
+	}
+	if direct, ok := res["direct_readable"].(bool); !ok || !direct {
+		t.Fatalf("direct_readable = %#v, want true after auto image_key refresh", res["direct_readable"])
+	}
+	decodedPaths, ok := res["decoded_local_paths"].([]string)
+	if !ok || len(decodedPaths) != 1 {
+		t.Fatalf("decoded_local_paths = %#v, want one decoded path", res["decoded_local_paths"])
+	}
+	if _, err := os.Stat(decodedPaths[0]); err != nil {
+		t.Fatalf("decoded path is not readable: %v", err)
+	}
+	fresh, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ImageKey != hex.EncodeToString(key) {
+		t.Fatalf("saved image_key = %q, want refreshed key", fresh.ImageKey)
+	}
+}
+
+func TestImageKeyCandidatesIncludesConfigWhenEnvSet(t *testing.T) {
+	key := []byte("abcdefghijklmnop")
+	t.Setenv("WX_MCP_IMAGE_KEY", "badbadbadbadbadb")
+	srv := &server{cfg: &config.Config{ImageKey: hex.EncodeToString(key)}}
+	candidates := srv.imageKeyCandidates()
+	if len(candidates) < 2 {
+		t.Fatalf("imageKeyCandidates len=%d, want env and config candidates", len(candidates))
+	}
+	var sawConfig bool
+	for _, cand := range candidates {
+		if cand.source == "config_hex" && bytes.Equal(cand.key, key) {
+			sawConfig = true
+		}
+	}
+	if !sawConfig {
+		t.Fatalf("config image_key candidate missing when env is set: %#v", candidates)
 	}
 }
 

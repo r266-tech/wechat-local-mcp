@@ -107,15 +107,15 @@ var toolDefs = []toolDef{
 	{
 		Name: "messages",
 		Description: "会话消息, 默认直接读取实时微信消息 DB, 不缓存聊天正文. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wx-mcp 用 metadata cache 自动解析. " +
-			"view=agent 返回给 agent 直接消费的扁平 timeline: id(local_id/server_id_str/talker) / time / sender / sender_wxid / is_from_me / kind / text / warnings, " +
+			"view=agent 返回给 agent 直接消费的 query/freshness/messages envelope; query 含 returned/limit/offset/has_more/next_offset, 用于可靠分页爬全量. messages[] 是低噪声 timeline 行: id(local_id/server_id_str/talker) / time / create_time(unix秒) / time_iso / sender / sender_wxid / is_from_me / kind / text / warnings, " +
 			"并为非文本消息提供 display-ready 结构: images / videos / files / link / music / miniprogram / forward_chat / quote / transfer / red_packet / location / card / voice / video / sticker / solitaire / announcement / pat. " +
-			"默认遵循微信 UI 可见语义: 图片/视频/文件给 agent 可直接读取的本机 path, 语音默认优先用 faster-whisper large-v3 返回本地 ASR transcript, raw SILK、不可读 .dat、CDN/aeskey、协议码和 raw XML 下沉到 debug/full/media_resources; 引用消息会扁平到 quote 并复用原消息可见 payload; 链接直接给 title/url/source/thumb_url. " +
+			"默认遵循微信 UI 可见语义: 图片/视频/文件给 agent 可直接读取的本机 path, 语音默认优先用 faster-whisper large-v3 返回本地 ASR transcript, raw SILK、不可读 .dat、CDN/aeskey、协议码和 raw XML 下沉到 debug/full/media_resources; 引用消息会扁平到 quote 并复用原消息可见 payload; 合并转发 item 使用 source_id 统一关联原消息, 媒体无法解析时给明确 warnings; 链接直接给 title/url/source/thumb_url. " +
 			"fields=lite (默认) 返回: local_id / server_id / server_id_str / create_time / create_time_human / " +
 			"talker / talker_display_name / chat_type / sender_wxid / sender_display_name / is_from_me / base_kind / kind_name / content_summary " +
 			"/ id / display / display-ready 非文本结构 / warnings (群聊已剥 'wxid:\\n' 前缀). " +
 			"正常 agent 查询不需要 fields=full; 默认隐藏 media_resources/media_read_hints/CDN/aeskey/.dat 解码细节. 维护者诊断时才传 include_debug=true/debug=true 或 fields=full. 可传 include_media_paths=false 跳过媒体路径补齐. " +
 			"若消息 XML 或引用消息(refermsg)里的真实图片 md5 能匹配本机 temp 里的 PNG/JPG 副本, media_read_hints 会优先给 direct_readable_local_paths 供 agent 直接读图; 引用图片带 source=message_refermsg / message_role=referenced_message. " +
-			"图片 .dat 会 best-effort 解码到 ~/.wx-mcp/media-cache 并返回 decoded_media_local_paths / decoded_local_paths; 微信 V4 图片缺 image_key 时 agent view 只给 concise warning, debug/full 返回 decode_status=needs_image_key. " +
+			"图片 .dat 会 best-effort 解码到 ~/.wx-mcp/media-cache 并返回 decoded_media_local_paths / decoded_local_paths; 微信 V4 图片缺 image_key 或 image_key 失效时会先自动跑 wxkey image-key 刷新并重试, 仍失败才在 agent view 给 concise warning, debug/full 返回 decode_status=needs_image_key 和刷新诊断. " +
 			"fields=full 是调试兼容接口, 额外返回: subtype / message_content (raw 文本/XML) / " +
 			"message_content_parsed (图/表情/app/语音 XML 结构化, 引用递归 depth=5). " +
 			"forward_chat (subtype=19) 的 parsed 额外含 forward_items[] (每条: datatype/sourcename/sourcetime/datatitle/datadesc/datafmt/fullmd5/datasize/src_msg_localid); " +
@@ -147,7 +147,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "chat_timeline",
-		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; messages 是低噪声 agent 行, 每条有稳定 id、sender_wxid/is_from_me、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
+		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; query 含 returned/limit/offset/has_more/next_offset 便于可靠分页爬全量; messages 是低噪声 agent 行, 每条有稳定 id、time/create_time/time_iso、sender_wxid/is_from_me、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
 		InputSchema: jsonSchema(props{
 			"talker":              strProp("会话对象 (wxid 或 xxx@chatroom)"),
 			"chat":                strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
@@ -171,10 +171,9 @@ var toolDefs = []toolDef{
 	{
 		Name: "media_resources",
 		Description: "消息附件/媒体资源定位. 读取 message_resource.db, 按 chat/talker/local_id/server_id/time/sender/type 过滤, " +
-			"返回每条消息的 server_id_str + resources[]: resource_id / resource_family(image/video/file/cover/unknown) / raw type / variant_code / size / status / " +
-			"packed_strings(文件名或 md5) / local_paths / local_path_uris / local_path_details(含 storage_format、direct_readable、decode_status) / media_read_hints. " +
-			"对图片会补查消息 XML 的真实图片 md5, 若本机 temp 存在同 md5 PNG/JPG 副本则优先返回 direct_readable_local_paths. " +
-			"图片 .dat 会 best-effort 解码到 ~/.wx-mcp/media-cache 并返回 decoded_local_paths; 微信 V4 图片缺 image_key 时 direct_readable=false 且 decode_status=needs_image_key. wx-mcp 不做图片识别. " +
+			"默认返回 agent-ready 资源: images/videos/files[].path 和 resources[].path 只会是可直接读取的本机图片/视频/文件路径, resources 默认不暴露 resource_id/status/raw family/variant 等维护字段. " +
+			"不可读 .dat、重复候选 paths、local_path_details、raw type/variant_code、解码细节和候选路径默认隐藏; 维护者诊断时传 include_debug=true/debug=true 才返回. " +
+			"对图片会补查消息 XML 的真实图片 md5, 若本机 temp 存在同 md5 PNG/JPG 副本则优先返回真实 path. 图片 .dat 会 best-effort 解码到 ~/.wx-mcp/media-cache; 微信 V4 图片缺 image_key 或 image_key 失效时会自动跑 wxkey image-key 刷新并重试, 仍失败才给 concise warning, 不把 .dat 当图片路径给 agent. wx-mcp 不做图片识别. " +
 			"适合 agent 在 messages/search 拿到 local_id 或 server_id 后继续定位图片、视频、文件和转发记录里的资源. " +
 			"after/before 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
@@ -194,6 +193,8 @@ var toolDefs = []toolDef{
 			"resource_family":       strProp("可选: image / video / file / cover / unknown"),
 			"resource_type_raw":     intProp("可选: MessageResourceDetail.type raw int"),
 			"include_local_paths":   boolProp("是否返回已存在本地文件路径 (默认 true)"),
+			"include_debug":         boolProp("是否返回 .dat/local_path_details/raw type/解码细节等调试信息 (默认 false)"),
+			"debug":                 boolProp("include_debug 的别名"),
 			"limit":                 intProp("返回消息条数 (默认 50)"),
 			"offset":                intProp("跳过消息条数 (默认 0)"),
 		}, nil),
