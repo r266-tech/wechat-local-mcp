@@ -919,20 +919,24 @@ sudo_keychain_account() {
 
 queue_purge_state_actions() {
   ACTIONS+=("remove wxkey config file $HOME/.config/wxcli/config.json")
+  ACTIONS+=("remove empty wxkey config dir $HOME/.config/wxcli when no lib remains")
   ACTIONS+=("remove wechat-cli state dir $HOME/.wechat-cli")
   ACTIONS+=("remove legacy wx-mcp state dir $HOME/.wx-mcp")
   ACTIONS+=("remove wechat-cli logs $LOG_DIR")
+  ACTIONS+=("remove legacy wx-mcp logs $HOME/Library/Logs/wx-mcp")
   ACTIONS+=("delete Keychain generic password r266.wx-mcp.sudo for account $(sudo_keychain_account)")
 }
 
 run_purge_state() {
   rm -f "$HOME/.config/wxcli/config.json"
+  rmdir "$HOME/.config/wxcli" 2>/dev/null || true
   rm -rf "$HOME/.wechat-cli"
   rm -rf "$HOME/.wx-mcp"
   if [[ -x /usr/bin/security ]]; then
     /usr/bin/security delete-generic-password -a "$(sudo_keychain_account)" -s "r266.wx-mcp.sudo" >/dev/null 2>&1 || true
   fi
   rm -rf "$LOG_DIR"
+  rm -rf "$HOME/Library/Logs/wx-mcp"
 }
 
 remove_watcher() {
@@ -954,26 +958,56 @@ remove_watcher() {
 }
 
 remove_cli_shims() {
-  local path target
+  local shim target
   local -a paths
   paths=("$SHIM_PATH" "$BIN_DIR/$LEGACY_APP_NAME" "$HOME/.local/bin/$APP_NAME" "$HOME/.local/bin/$LEGACY_APP_NAME")
-  for path in "${(@u)paths[@]}"; do
-    [[ -n "$path" ]] || continue
-    ACTIONS+=("remove CLI command shim $path if managed by wechat-cli")
-    if [[ "$DRY_RUN" -eq 1 || ! -e "$path" ]]; then
+  for shim in "${(@u)paths[@]}"; do
+    [[ -n "$shim" ]] || continue
+    ACTIONS+=("remove CLI command shim $shim if managed by wechat-cli")
+    if [[ "$DRY_RUN" -eq 1 || ( ! -e "$shim" && ! -L "$shim" ) ]]; then
       continue
     fi
-    if [[ -L "$path" ]]; then
-      target="$(readlink "$path" 2>/dev/null || true)"
+    if [[ -L "$shim" ]]; then
+      target="$(readlink "$shim" 2>/dev/null || true)"
       case "$target" in
         "$INSTALL_DIR/$APP_NAME"|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"|"$LEGACY_INSTALL_DIR/$APP_NAME"|*/wechat-cli/wechat-cli|*/wx-mcp/wx-mcp)
-          rm -f "$path"
+          rm -f "$shim"
           ;;
       esac
-    elif same_file "$path" "$INSTALL_DIR/$APP_NAME"; then
-      rm -f "$path"
+    elif same_file "$shim" "$INSTALL_DIR/$APP_NAME"; then
+      rm -f "$shim"
     fi
   done
+}
+
+stop_installed_processes() {
+  ACTIONS+=("stop running wechat-cli/wx-mcp processes from install dirs")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  local pid cmd self
+  self="$$"
+  while IFS= read -r line; do
+    pid="${line%% *}"
+    cmd="${line#${pid} }"
+    [[ -n "$pid" && "$pid" != "$self" ]] || continue
+    case "$cmd" in
+      "$INSTALL_DIR/$APP_NAME"*|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"*|"$LEGACY_INSTALL_DIR/$APP_NAME"*)
+        kill "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done < <(ps -axo pid=,command= 2>/dev/null | sed -E 's/^ *//')
+  sleep 0.5
+  while IFS= read -r line; do
+    pid="${line%% *}"
+    cmd="${line#${pid} }"
+    [[ -n "$pid" && "$pid" != "$self" ]] || continue
+    case "$cmd" in
+      "$INSTALL_DIR/$APP_NAME"*|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"*|"$LEGACY_INSTALL_DIR/$APP_NAME"*)
+        kill -KILL "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done < <(ps -axo pid=,command= 2>/dev/null | sed -E 's/^ *//')
 }
 
 clear_state() {
@@ -987,6 +1021,7 @@ clear_state() {
 
 uninstall() {
   remove_watcher
+  stop_installed_processes
   remove_cli_shims
   ACTIONS+=("remove install dir $INSTALL_DIR")
   ACTIONS+=("remove legacy install dir $LEGACY_INSTALL_DIR")

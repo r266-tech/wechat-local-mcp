@@ -431,9 +431,11 @@ function Clear-LegacyMessageCache {
 
 function Add-PurgeStateActions {
   Add-Action ("remove wxkey config file {0}" -f (Join-Path $HOME ".config\wxcli\config.json"))
+  Add-Action ("remove empty wxkey config dir {0} when no lib remains" -f (Join-Path $HOME ".config\wxcli"))
   Add-Action ("remove wechat-cli state dir {0}" -f (Join-Path $HOME ".wechat-cli"))
   Add-Action ("remove legacy wx-mcp state dir {0}" -f (Join-Path $HOME ".wx-mcp"))
   Add-Action "remove wechat-cli install logs $logDir"
+  Add-Action ("remove legacy wx-mcp logs {0}" -f (Join-Path $HOME "Library\Logs\wx-mcp"))
 }
 
 function Invoke-PurgeState {
@@ -448,6 +450,18 @@ function Invoke-PurgeState {
       Remove-Item -LiteralPath $path -Recurse -Force
     }
   }
+  $wxcliDir = Join-Path $HOME ".config\wxcli"
+  if (Test-Path $wxcliDir) {
+    try {
+      Remove-Item -LiteralPath $wxcliDir -Force -ErrorAction Stop
+    } catch {
+      # Keep ~/.config/wxcli/lib if the user installed a shared WCDB DLL there.
+    }
+  }
+  $legacyLog = Join-Path $HOME "Library\Logs\wx-mcp"
+  if (Test-Path $legacyLog) {
+    Remove-Item -LiteralPath $legacyLog -Recurse -Force
+  }
 }
 
 function Clear-State {
@@ -458,7 +472,26 @@ function Clear-State {
   $script:status = "state_cleared"
 }
 
+function Stop-InstalledProcesses {
+  $roots = @($InstallDir, $LegacyInstallDir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  if ($roots.Count -eq 0) { return }
+  $ownPid = $PID
+  $procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessId -ne $ownPid -and
+    -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+    ($roots | Where-Object { $_.ExecutablePath.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+  }
+  foreach ($proc in $procs) {
+    try {
+      Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+    } catch {
+      Add-Warning ("failed to stop process {0}: {1}" -f $proc.ProcessId, $_.Exception.Message)
+    }
+  }
+}
+
 function Uninstall-WxMcp {
+  Add-Action "stop running wechat-cli/wx-mcp processes from install dirs"
   Add-Action "remove CLI command shim $ShimPath if managed by wechat-cli"
   Add-Action "remove legacy CLI command shim $LegacyShimPath if managed by wechat-cli"
   Add-Action "remove install directory $InstallDir"
@@ -467,12 +500,15 @@ function Uninstall-WxMcp {
   if ($script:purgeState) {
     Add-PurgeStateActions
   }
+  if (-not $DryRun) {
+    Stop-InstalledProcesses
+  }
   if (-not $DryRun -and (Test-Path $InstallDir)) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
   }
   if (-not $DryRun) {
     foreach ($path in @($ShimPath, $LegacyShimPath)) {
-      if (-not (Test-Path $path)) { continue }
+      if (-not (Test-Path -LiteralPath $path)) { continue }
       $content = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
       if ($content -match [regex]::Escape($InstallDir) -or $content -match [regex]::Escape($LegacyInstallDir) -or $content -match "wechat-cli\\wechat-cli\.exe" -or $content -match "wx-mcp\\wx-mcp\.exe") {
         Remove-Item -LiteralPath $path -Force

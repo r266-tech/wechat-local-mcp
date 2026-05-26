@@ -138,7 +138,7 @@ go build -trimpath -o wechat-cli ./cmd/wx-mcp
 macOS release 包：
 
 ```bash
-WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.3
+WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.4
 ```
 
 Windows release 包由 GitHub Actions 的 `Windows Release Package` workflow 构建。
