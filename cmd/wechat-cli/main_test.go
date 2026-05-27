@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/r266-tech/wechat-local-mcp/internal/config"
-	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
-	"github.com/r266-tech/wechat-local-mcp/internal/wxkey"
-	"github.com/r266-tech/wechat-local-mcp/internal/wxparse"
+	"github.com/r266-tech/wechat-cli/internal/config"
+	"github.com/r266-tech/wechat-cli/internal/wcdb"
+	"github.com/r266-tech/wechat-cli/internal/wxkey"
+	"github.com/r266-tech/wechat-cli/internal/wxparse"
 )
 
 func TestParseTS_UnixSeconds(t *testing.T) {

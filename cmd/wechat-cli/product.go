@@ -9,7 +9,7 @@ import (
 const (
 	appName       = "wechat-cli"
 	legacyAppName = "wx-mcp"
-	appVersion    = "1.6.4"
+	appVersion    = "1.6.5"
 
 	stateDirName       = ".wechat-cli"
 	legacyStateDirName = ".wx-mcp"
@@ -37,7 +37,7 @@ func appStateDir() (string, error) {
 	if p := envFirst("WECHAT_CLI_STATE_DIR", "WX_MCP_STATE_DIR"); p != "" {
 		return filepath.Clean(p), nil
 	}
-	home, err := wxMCPHomeDir()
+	home, err := wechatCLIHomeDir()
 	if err != nil {
 		return "", err
 	}
@@ -45,7 +45,7 @@ func appStateDir() (string, error) {
 }
 
 func legacyStateDir() (string, error) {
-	home, err := wxMCPHomeDir()
+	home, err := wechatCLIHomeDir()
 	if err != nil {
 		return "", err
 	}

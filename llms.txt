@@ -11,8 +11,8 @@ Do not use for:
 - sending messages, controlling the WeChat UI, Accessibility automation, Official Account publishing, Mini Program devtools, WeCom bots, or reply bots
 
 Install:
-- macOS: `curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh`
-- Windows: `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"`
+- macOS: `curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh`
+- Windows: `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"`
 - Default install is CLI-only: no MCP registration, no watcher.
 - Optional MCP: pass `--mcp` on macOS or `-Mcp` on Windows; clients must invoke `wechat-cli serve-mcp`.
 

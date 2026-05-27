@@ -140,7 +140,7 @@ function Finish {
   exit $Code
 }
 
-function Resolve-WxMcp {
+function Resolve-WechatCli {
   $bin = Join-Path $SourceDir "$AppName.exe"
   if (Test-Path $bin) {
     Add-Action "copy $AppName.exe from source directory"
@@ -151,7 +151,7 @@ function Resolve-WxMcp {
     Add-Action "copy legacy $LegacyAppName.exe from source directory"
     return @{ Mode = "copy"; Path = $legacyBin }
   }
-  if ((Test-Path (Join-Path $SourceDir "cmd\wx-mcp\main.go")) -and (Have-Command "go")) {
+  if ((Test-Path (Join-Path $SourceDir "cmd\wechat-cli\main.go")) -and (Have-Command "go")) {
     Add-Action "build $AppName.exe from source"
     return @{ Mode = "build"; Path = $SourceDir }
   }
@@ -284,7 +284,7 @@ function Remove-McpEntries {
 }
 
 function Resolve-Components {
-  $wx = Resolve-WxMcp
+  $wx = Resolve-WechatCli
   $dll = Resolve-WcdbDll
   return @{ Wx = $wx; Dll = $dll }
 }
@@ -326,8 +326,8 @@ function Install-Components {
   if ($wx.Mode -eq "build") {
     Push-Location $wx.Path
     try {
-      Write-Log "go build -o $InstallDir\$AppName.exe ./cmd/wx-mcp"
-      & go build -o (Join-Path $InstallDir "$AppName.exe") ./cmd/wx-mcp 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+      Write-Log "go build -o $InstallDir\$AppName.exe ./cmd/wechat-cli"
+      & go build -o (Join-Path $InstallDir "$AppName.exe") ./cmd/wechat-cli 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
       if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
     } finally {
       Pop-Location

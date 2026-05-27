@@ -13,13 +13,13 @@ macOS / Windows · 本地解密 · 一行安装 · 稳定 JSON · 聊天记录 /
 macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh
 ```
 
 Windows:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"
 ```
 
 默认安装的是 CLI，不注册 MCP，不装后台 watcher。安装完成后命令会放到用户 PATH 上：
@@ -132,13 +132,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Mcp
 
 ```bash
 go test ./...
-go build -trimpath -o wechat-cli ./cmd/wx-mcp
+go build -trimpath -o wechat-cli ./cmd/wechat-cli
 ```
 
 macOS release 包：
 
 ```bash
-WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.4
+WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.5
 ```
 
 Windows release 包由 GitHub Actions 的 `Windows Release Package` workflow 构建。

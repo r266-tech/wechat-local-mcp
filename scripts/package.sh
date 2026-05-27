@@ -28,7 +28,7 @@ echo "→ building wechat-cli binary..."
 # -trimpath strips build-host absolute paths from the binary; -ldflags "-s -w"
 # strips symbol/debug tables so release binaries do not leak the build
 # environment (e.g. /Users/<dev>/... or Go module cache locations).
-go build -trimpath -ldflags="-s -w" -o "$DIST/wechat-cli" ./cmd/wx-mcp
+go build -trimpath -ldflags="-s -w" -o "$DIST/wechat-cli" ./cmd/wechat-cli
 chmod +x "$DIST/wechat-cli"
 
 echo "→ building wxkey binary..."

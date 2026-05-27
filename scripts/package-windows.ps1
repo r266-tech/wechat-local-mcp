@@ -93,7 +93,7 @@ $dist = Join-Path $distRoot "wechat-cli-v$Version-windows-amd64"
 if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-& go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wx-mcp
+& go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wechat-cli
 if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 
 Copy-Item -LiteralPath $WcdbLib -Destination (Join-Path $dist "libWCDB.dll") -Force

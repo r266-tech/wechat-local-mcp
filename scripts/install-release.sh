@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-REPO="${WECHAT_CLI_REPO:-${WX_MCP_REPO:-https://github.com/r266-tech/wechat-local-mcp}}"
+REPO="${WECHAT_CLI_REPO:-${WX_MCP_REPO:-https://github.com/r266-tech/wechat-cli}}"
 TAG="${WECHAT_CLI_RELEASE_TAG:-${WX_MCP_RELEASE_TAG:-latest}}"
 ASSET="${WECHAT_CLI_RELEASE_ASSET:-${WX_MCP_RELEASE_ASSET:-wechat-cli-latest-darwin-arm64.zip}}"
 KEEP_DOWNLOAD="${WECHAT_CLI_KEEP_DOWNLOAD:-${WX_MCP_KEEP_DOWNLOAD:-0}}"
@@ -16,11 +16,11 @@ INSTALL_ARGS=(--all --yes)
 usage() {
   cat <<'EOF'
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh
+  curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [installer args...]
 
 Environment:
-  WECHAT_CLI_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-local-mcp.
+  WECHAT_CLI_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-cli.
   WECHAT_CLI_RELEASE_TAG      GitHub release tag. Default: latest.
   WECHAT_CLI_RELEASE_ASSET    Release asset name. Default: wechat-cli-latest-darwin-arm64.zip.
   WECHAT_CLI_INSTALL_JSON     Pass --json to the bundled installer when set to 1.

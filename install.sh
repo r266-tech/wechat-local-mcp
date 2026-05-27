@@ -32,8 +32,8 @@ REGISTER_MCP=0
 MCP_OPTION_SEEN=0
 PURGE_STATE=0
 
-WXMCP_MODE=""
-WXMCP_SOURCE=""
+CLI_MODE=""
+CLI_SOURCE=""
 WXKEY_MODE=""
 WXKEY_SOURCE=""
 LIB_SOURCE=""
@@ -486,27 +486,27 @@ confirm_or_die() {
 }
 
 resolve_components() {
-  if [[ -f "$SOURCE_DIR/cmd/wx-mcp/main.go" ]]; then
+  if [[ -f "$SOURCE_DIR/cmd/wechat-cli/main.go" ]]; then
     if have_cmd go; then
-      WXMCP_MODE="build"
-      WXMCP_SOURCE="$SOURCE_DIR"
+      CLI_MODE="build"
+      CLI_SOURCE="$SOURCE_DIR"
     elif [[ -x "$SOURCE_DIR/$APP_NAME" ]]; then
-      WXMCP_MODE="copy"
-      WXMCP_SOURCE="$SOURCE_DIR/$APP_NAME"
+      CLI_MODE="copy"
+      CLI_SOURCE="$SOURCE_DIR/$APP_NAME"
       warn "go not found; using existing $APP_NAME binary from source dir"
     elif [[ -x "$SOURCE_DIR/$LEGACY_APP_NAME" ]]; then
-      WXMCP_MODE="copy"
-      WXMCP_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
+      CLI_MODE="copy"
+      CLI_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
       warn "go not found; using legacy $LEGACY_APP_NAME binary from source dir"
     else
       ERRORS+=("go not found and no $APP_NAME binary available")
     fi
   elif [[ -x "$SOURCE_DIR/$APP_NAME" ]]; then
-    WXMCP_MODE="copy"
-    WXMCP_SOURCE="$SOURCE_DIR/$APP_NAME"
+    CLI_MODE="copy"
+    CLI_SOURCE="$SOURCE_DIR/$APP_NAME"
   elif [[ -x "$SOURCE_DIR/$LEGACY_APP_NAME" ]]; then
-    WXMCP_MODE="copy"
-    WXMCP_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
+    CLI_MODE="copy"
+    CLI_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
   else
     ERRORS+=("$APP_NAME source or binary not found under $SOURCE_DIR")
   fi
@@ -547,7 +547,7 @@ resolve_components() {
     ERRORS+=("libWCDB.dylib not found; use release zip, set WECHAT_CLI_WCDB_DYLIB, or place it at ./lib/libWCDB.dylib / ~/.config/wxcli/lib/libWCDB.dylib")
   fi
 
-  [[ -n "$WXMCP_MODE" ]] && ACTIONS+=("$WXMCP_MODE $APP_NAME from $WXMCP_SOURCE")
+  [[ -n "$CLI_MODE" ]] && ACTIONS+=("$CLI_MODE $APP_NAME from $CLI_SOURCE")
   [[ -n "$WXKEY_MODE" ]] && ACTIONS+=("$WXKEY_MODE wxkey from $WXKEY_SOURCE")
   [[ -n "$LIB_SOURCE" ]] && ACTIONS+=("copy libWCDB.dylib from $LIB_SOURCE")
 }
@@ -564,10 +564,10 @@ install_components() {
 
   mkdir -p "$INSTALL_DIR"
 
-  if [[ "$WXMCP_MODE" == "build" ]]; then
-    run_logged_in "$WXMCP_SOURCE" go build -o "$INSTALL_DIR/$APP_NAME" ./cmd/wx-mcp || die "build $APP_NAME failed; see $INSTALL_LOG" 1
+  if [[ "$CLI_MODE" == "build" ]]; then
+    run_logged_in "$CLI_SOURCE" go build -o "$INSTALL_DIR/$APP_NAME" ./cmd/wechat-cli || die "build $APP_NAME failed; see $INSTALL_LOG" 1
   else
-    cp "$WXMCP_SOURCE" "$INSTALL_DIR/$APP_NAME" || die "copy $APP_NAME failed" 1
+    cp "$CLI_SOURCE" "$INSTALL_DIR/$APP_NAME" || die "copy $APP_NAME failed" 1
   fi
   chmod +x "$INSTALL_DIR/$APP_NAME"
 

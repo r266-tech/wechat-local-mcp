@@ -1,8 +1,8 @@
 {
   "name": "wechat-cli",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "CLI-first local WeChat 4.x data reader for macOS and Windows, with an optional legacy MCP stdio adapter.",
-  "homepage": "https://github.com/r266-tech/wechat-local-mcp",
+  "homepage": "https://github.com/r266-tech/wechat-cli",
   "license": "MIT",
   "platforms": ["darwin-arm64", "windows-amd64"],
   "transport": {
@@ -13,10 +13,10 @@
     "windowsArgs": ["serve-mcp"]
   },
   "installer": {
-    "oneLineMacOS": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | zsh",
-    "oneLineMacOSJson": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh",
-    "oneLineWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex\"",
-    "oneLineWindowsJson": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-local-mcp/main/scripts/install-release.ps1 | iex\"",
+    "oneLineMacOS": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh",
+    "oneLineMacOSJson": "curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh",
+    "oneLineWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex\"",
+    "oneLineWindowsJson": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex\"",
     "command": "./install.sh --all --yes --json",
     "doctor": "./install.sh --doctor --json",
     "update": "./install.sh --update --yes --json",

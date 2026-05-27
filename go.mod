@@ -1,4 +1,4 @@
-module github.com/r266-tech/wechat-local-mcp
+module github.com/r266-tech/wechat-cli
 
 go 1.26.2
 

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/r266-tech/wechat-local-mcp/internal/config"
-	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
+	"github.com/r266-tech/wechat-cli/internal/config"
+	"github.com/r266-tech/wechat-cli/internal/wcdb"
 )
 
 func main() {

@@ -1,5 +1,8 @@
 # wx-mcp Windows Query Adaptation Design
 
+Historical note: this document predates the project rename to `wechat-cli`;
+old `wx-mcp` names are retained when describing original design constraints.
+
 Date: 2026-05-18
 Status: ready for implementation review
 Decision: implement option A, the Windows query/runtime edition.

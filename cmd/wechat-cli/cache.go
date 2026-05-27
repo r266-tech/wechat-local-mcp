@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/r266-tech/wechat-local-mcp/internal/config"
-	"github.com/r266-tech/wechat-local-mcp/internal/wcdb"
-	"github.com/r266-tech/wechat-local-mcp/internal/wxkind"
+	"github.com/r266-tech/wechat-cli/internal/config"
+	"github.com/r266-tech/wechat-cli/internal/wcdb"
+	"github.com/r266-tech/wechat-cli/internal/wxkind"
 )
 
 var errCacheMissing = errors.New("cache index missing; run cache_refresh first")
@@ -750,7 +750,7 @@ func cacheWorkerCount(total int) int {
 	return n
 }
 
-func wxMCPHomeDir() (string, error) {
+func wechatCLIHomeDir() (string, error) {
 	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
 		return h, nil
 	}
