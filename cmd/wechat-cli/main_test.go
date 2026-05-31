@@ -23,6 +23,30 @@ import (
 	"github.com/r266-tech/wechat-cli/internal/wxparse"
 )
 
+func captureStdout(t *testing.T, fn func()) []byte {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	var buf bytes.Buffer
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := buf.ReadFrom(r)
+		errCh <- err
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	return buf.Bytes()
+}
+
 func TestParseTS_UnixSeconds(t *testing.T) {
 	got, err := parseTS("1776330000")
 	if err != nil || got != 1776330000 {
@@ -157,22 +181,12 @@ func TestCLIHelpDocumentForCommand(t *testing.T) {
 }
 
 func TestToolSchemaEnvelopeIdentifiesCommand(t *testing.T) {
-	var buf bytes.Buffer
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	runToolSchemaCLI([]string{"timeline"}, cliOptions{})
-	_ = w.Close()
-	os.Stdout = old
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatal(err)
-	}
+	out := captureStdout(t, func() {
+		runToolSchemaCLI([]string{"timeline"}, cliOptions{})
+	})
 	var env cliSuccessEnvelope
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("tool-schema output is not success envelope: %v\n%s", err, buf.String())
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("tool-schema output is not success envelope: %v\n%s", err, string(out))
 	}
 	if !env.OK || env.Tool != "tool_schema" || env.Command != "tool-schema" {
 		t.Fatalf("tool-schema envelope = %#v", env)
@@ -195,20 +209,10 @@ func TestCLIHelpDocumentUnknownTarget(t *testing.T) {
 }
 
 func TestWriteJSONCLICompactByDefault(t *testing.T) {
-	var buf bytes.Buffer
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	writeJSONCLI(map[string]any{"ok": true}, cliOptions{})
-	_ = w.Close()
-	os.Stdout = old
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatal(err)
-	}
-	got := buf.String()
+	out := captureStdout(t, func() {
+		writeJSONCLI(map[string]any{"ok": true}, cliOptions{})
+	})
+	got := string(out)
 	if got != "{\"ok\":true}\n" {
 		t.Fatalf("compact JSON = %q", got)
 	}
