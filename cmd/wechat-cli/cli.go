@@ -47,6 +47,7 @@ type cliCommandSpec struct {
 
 var cliCommandSpecs = []cliCommandSpec{
 	{Command: "tools", Aliases: []string{"list-tools", "list_tools"}, Usage: appName + " tools", Description: "List all tool schemas.", Examples: []string{appName + " tools"}},
+	{Command: "update", Aliases: []string{"upgrade", "self-update", "self_update"}, Usage: appName + " update [--dry-run] [--tag vX.Y.Z]", Description: "Update an installed release to the latest GitHub release.", Examples: []string{appName + " update", appName + " update --dry-run"}},
 	{Command: "call", Usage: appName + " call <tool> [--key value ...]", Description: "Call a tool with key/value CLI arguments.", Examples: []string{appName + " call chat_timeline --chat wxmcp测试群 --limit 20"}},
 	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <tool> '<json args>'", Description: "Call a tool with a JSON argument object from argv or stdin.", Examples: []string{appName + " call-json messages '{\"chat\":\"wxmcp测试群\",\"limit\":20,\"view\":\"agent\"}'"}},
 	{Command: "tool-schema", Aliases: []string{"describe", "describe-tool", "tool_schema"}, Usage: appName + " tool-schema <command-or-tool>", Description: "Return one command/tool schema.", Examples: []string{appName + " tool-schema timeline"}},
@@ -100,6 +101,9 @@ func maybeRunCLI(args []string) bool {
 		return true
 	case "tools", "list-tools", "list_tools":
 		runToolsCLI(opts)
+		return true
+	case "update", "upgrade", "self-update", "self_update":
+		runUpdateCLI(args[1:], opts)
 		return true
 	case "call":
 		runGenericToolCLI(args[1:], opts)

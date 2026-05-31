@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.6.6",
+  [string]$Version = "1.6.7",
   [string]$WcdbLib = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_LIB)) { $env:WECHAT_CLI_WCDB_LIB } else { $env:WX_MCP_WCDB_LIB })
 )
 

@@ -16,6 +16,12 @@ Install:
 - Default install is CLI-only: no MCP registration, no watcher.
 - Optional MCP: pass `--mcp` on macOS or `-Mcp` on Windows; clients must invoke `wechat-cli serve-mcp`.
 
+Update:
+- Preferred: `wechat-cli update`
+- macOS waits and returns installer JSON inside the CLI envelope.
+- Windows starts a background updater because the running `.exe` cannot be overwritten; check `data.log` if verification fails.
+- Old installs without `wechat-cli update`: rerun the install one-liner.
+
 Runtime:
 - Binary: `wechat-cli` / `wechat-cli.exe`
 - macOS install dir: `~/.local/share/wechat-cli`
@@ -35,6 +41,7 @@ Release assets:
 - Windows versioned: `wechat-cli-vX.Y.Z-windows-amd64.zip`
 
 Core commands:
+- `wechat-cli update`
 - `wechat-cli sessions`
 - `wechat-cli resolve-chat "张三"`
 - `wechat-cli timeline "某群" --limit 20`

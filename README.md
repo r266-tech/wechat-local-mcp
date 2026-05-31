@@ -34,6 +34,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 - macOS 首次 key 初始化可能要求输入一次 Mac admin 密码；密码只输入到本机隐藏提示，不要发给 agent 或网页。密码会存入用户 Keychain，供后续本机 key refresh 使用；安装器也可能临时启动一个 wechat-cli 管理的 WeChat shadow copy 来完成 no-SIP 初始化
 - macOS 15+ 建议安装后把 `~/.local/share/wechat-cli/wechat-cli` 和 `~/.local/share/wechat-cli/wxkey` 加到 Full Disk Access，减少系统隐私弹窗
 
+## 更新
+
+安装过 release 版后，直接运行：
+
+```bash
+wechat-cli update
+```
+
+这个命令会下载 GitHub latest release zip、校验 sha256，然后用包内 installer 覆盖安装。macOS 会等待更新完成并返回 JSON；Windows 会先启动后台 updater 再退出，因为 Windows 不能覆盖正在运行的 `.exe`，返回 JSON 里的 `data.log` 是后台更新日志。agent 更新完后跑一次：
+
+```bash
+wechat-cli sessions
+```
+
+老版本还没有 `update` 命令时，重新运行上面的安装一行命令也会覆盖升级；agent 场景可在 macOS 上用 `curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh -s -- --update`。
+
 ## 快速开始
 
 ```bash
@@ -73,6 +89,7 @@ printf '{"keyword":"会议","limit":20}' | wechat-cli call-json search
 
 | 命令 | 用途 |
 | --- | --- |
+| `update` | 更新到 GitHub latest release |
 | `sessions` | 最近会话、未读数、最后消息摘要 |
 | `resolve-chat` | 把昵称、备注、群名解析成稳定 talker |
 | `timeline` | 普通读聊天的首选入口，返回 `query` / `freshness` / `messages` |

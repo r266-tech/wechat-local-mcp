@@ -180,6 +180,21 @@ func TestCLIHelpDocumentForCommand(t *testing.T) {
 	}
 }
 
+func TestCLIHelpDocumentForUpdateCommand(t *testing.T) {
+	raw := cliHelpDocument("update")
+	doc, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("help doc type = %T", raw)
+	}
+	cmd, ok := doc["command"].(cliCommandSpec)
+	if !ok || cmd.Command != "update" || cmd.Tool != "" {
+		t.Fatalf("command spec = %#v", doc["command"])
+	}
+	if _, ok := doc["tool"]; ok {
+		t.Fatalf("update help should not expose a tool schema: %#v", doc["tool"])
+	}
+}
+
 func TestToolSchemaEnvelopeIdentifiesCommand(t *testing.T) {
 	out := captureStdout(t, func() {
 		runToolSchemaCLI([]string{"timeline"}, cliOptions{})
@@ -290,6 +305,22 @@ func TestParseKVFlags(t *testing.T) {
 	got := parseKVFlags([]string{"--chat", "某群", "--limit=20", "--include-debug", "--server-id-str", "9223372036854775808"})
 	if got["chat"] != "某群" || got["limit"] != int64(20) || got["include_debug"] != true || got["server_id_str"] != "9223372036854775808" {
 		t.Fatalf("parseKVFlags = %#v", got)
+	}
+}
+
+func TestParseUpdateArgs(t *testing.T) {
+	got, err := parseUpdateArgs([]string{"--dry-run", "--tag", "v1.2.3", "--asset=wechat-cli-test.zip", "--repo", "r266-tech/wechat-cli"})
+	if err != nil {
+		t.Fatalf("parseUpdateArgs error: %v", err)
+	}
+	if !got.DryRun || got.Tag != "v1.2.3" || got.Asset != "wechat-cli-test.zip" || got.Repo != "r266-tech/wechat-cli" {
+		t.Fatalf("parseUpdateArgs = %#v", got)
+	}
+}
+
+func TestParseUpdateArgsRejectsUnknown(t *testing.T) {
+	if _, err := parseUpdateArgs([]string{"--nope"}); err == nil {
+		t.Fatal("parseUpdateArgs accepted unknown flag")
 	}
 }
 

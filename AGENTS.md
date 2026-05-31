@@ -99,8 +99,36 @@ sudo credential unattended.
 
 ## Update
 
-For an existing release-zip install, download and extract the newest release zip
-first, then run from the newly extracted directory:
+For an existing release install, prefer the first-class updater:
+
+```bash
+wechat-cli update
+```
+
+```powershell
+wechat-cli update
+```
+
+`wechat-cli update` downloads the latest GitHub release zip, verifies sha256
+when the checksum asset is present, then runs the bundled installer in update
+mode. On macOS it waits for completion and returns the installer result inside
+the normal CLI JSON envelope. On Windows it starts a background updater because
+Windows cannot overwrite the running `.exe`; inspect `data.log` if verification
+fails.
+
+For old installs that do not have `wechat-cli update` yet, run the release
+bootstrap again:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh -s -- --update
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); $p=Join-Path $env:TEMP 'wechat-cli-install-release.ps1'; iwr https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 -OutFile $p -UseBasicParsing; powershell -NoProfile -ExecutionPolicy Bypass -File $p -Update -Json"
+```
+
+When already inside a freshly extracted release zip, this lower-level command
+also works:
 
 ```bash
 ./install.sh --update --yes --json

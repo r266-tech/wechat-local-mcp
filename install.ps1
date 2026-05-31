@@ -306,7 +306,7 @@ function Update-Source {
       }
     }
   } else {
-    Add-Warning "source directory is not a git checkout; -Update reinstalls the files currently on disk. For release zip installs, download the newest zip first."
+    Add-Warning "source directory is not a git checkout; -Update installs the release files in this directory. If you are not using install-release.ps1, download the newest release zip first."
   }
 }
 

@@ -612,7 +612,7 @@ update_source() {
     run_logged_in "$SOURCE_DIR" git pull --ff-only || die "git update failed; resolve the checkout or download the latest release zip" 1
     return
   fi
-  warn "source_dir is not a git checkout; --update will reinstall current files only. For release-zip installs, have the agent download the latest GitHub release zip first."
+  warn "source_dir is not a git checkout; --update will install the release files in this directory. If you are not using install-release.sh, download the newest release zip first."
 }
 
 register_mcp() {
