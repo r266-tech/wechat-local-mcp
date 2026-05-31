@@ -408,10 +408,11 @@ var toolDefs = []toolDef{
 	{
 		Name: "export_messages",
 		Description: "导出单个 chat/talker 的消息到本地文件, 直接读取实时消息 DB; 不支持全局无关键词导出. " +
-			"format=jsonl/markdown/html, 支持 after/before/keyword/limit 过滤.",
+			"format=jsonl/markdown/html, 默认 view=agent: JSONL 每行与 timeline message 行同形; view=raw 保留底层消息字段. 支持 after/before/keyword/limit 过滤.",
 		InputSchema: jsonSchema(props{
 			"path":      strProp("输出文件绝对路径"),
 			"format":    enumStrProp("jsonl (默认) / markdown / html", "jsonl", "markdown", "html"),
+			"view":      enumStrProp("agent (默认, timeline message 行同形) / raw (底层消息字段)", "agent", "raw"),
 			"talker":    strProp("可选: 限定会话对象"),
 			"chat":      strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
 			"after":     strProp("可选: 起始时间"),

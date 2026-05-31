@@ -5,6 +5,7 @@ package wxkey
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,8 @@ const (
 
 	th32csSnapProcess = 0x00000002
 )
+
+var errWindowsKeyScanDeadline = errors.New("windows key scan deadline exceeded")
 
 var (
 	kernel32                = syscall.NewLazyDLL("kernel32.dll")
@@ -136,14 +139,31 @@ func runSetup() (*SetupResult, string, error) {
 	found := map[string]string{}
 	stats := windowsSetupStats{SourceDBs: len(dbs), TargetSalts: len(salts)}
 	var firstHitPID uint32
+	scanTimeout := windowsKeyScanTimeout()
+	scanDeadline := time.Time{}
+	if scanTimeout > 0 {
+		scanDeadline = time.Now().Add(scanTimeout)
+	}
+	timedOut := false
 	for _, p := range procs {
 		if len(found) == len(salts) {
+			break
+		}
+		if windowsKeyScanDeadlineExceeded(scanDeadline) {
+			timedOut = true
 			break
 		}
 		stats.ScannedProcesses++
 		stats.ScannedPIDs = append(stats.ScannedPIDs, p.pid)
 		before := len(found)
-		if err := windowsScanProcess(p.pid, salts, found); err != nil {
+		if err := windowsScanProcess(p.pid, salts, found, scanDeadline); err != nil {
+			if firstHitPID == 0 && len(found) > before {
+				firstHitPID = p.pid
+			}
+			if errors.Is(err, errWindowsKeyScanDeadline) {
+				timedOut = true
+				break
+			}
 			continue
 		}
 		if firstHitPID == 0 && len(found) > before {
@@ -171,6 +191,9 @@ func runSetup() (*SetupResult, string, error) {
 		})
 	}
 	if len(verified) == 0 {
+		if timedOut {
+			return nil, "", fmt.Errorf("Windows key scan timed out after %s before finding usable keys; keep WeChat logged in, open one chat, then retry", scanTimeout.Round(time.Second))
+		}
 		return nil, "", fmt.Errorf("no usable Windows WeChat raw keys found after scanning %d process(es); ensure WECHAT_CLI_DB_ROOT matches the logged-in account", stats.ScannedProcesses)
 	}
 
@@ -196,7 +219,35 @@ func runSetup() (*SetupResult, string, error) {
 		Results:    results,
 		Keys:       verified,
 	}
-	return res, fmt.Sprintf("Windows key scan OK: verified %d/%d db files from %d process(es)\n", stats.VerifiedDBs, stats.SourceDBs, stats.ScannedProcesses), nil
+	msg := fmt.Sprintf("Windows key scan OK: verified %d/%d db files from %d process(es)\n", stats.VerifiedDBs, stats.SourceDBs, stats.ScannedProcesses)
+	if timedOut {
+		msg = fmt.Sprintf("Windows key scan OK with partial coverage before timeout %s: verified %d/%d db files from %d process(es)\n", scanTimeout.Round(time.Second), stats.VerifiedDBs, stats.SourceDBs, stats.ScannedProcesses)
+	}
+	return res, msg, nil
+}
+
+func windowsKeyScanTimeout() time.Duration {
+	raw := firstEnv("WECHAT_CLI_KEY_SCAN_TIMEOUT", "WECHAT_CLI_WINDOWS_KEY_SCAN_TIMEOUT", "WX_MCP_KEY_SCAN_TIMEOUT")
+	if raw == "" {
+		return 3 * time.Minute
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	if sec, err := strconv.Atoi(raw); err == nil {
+		if sec < 0 {
+			return 0
+		}
+		return time.Duration(sec) * time.Second
+	}
+	return 3 * time.Minute
+}
+
+func windowsKeyScanDeadlineExceeded(deadline time.Time) bool {
+	return !deadline.IsZero() && time.Now().After(deadline)
 }
 
 func windowsFindWCDB() (string, error) {
@@ -374,7 +425,7 @@ func windowsCurrentPID() uint32 {
 	return uint32(r)
 }
 
-func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[string]string) error {
+func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[string]string, deadline time.Time) error {
 	h, _, err := procOpenProcess.Call(processVMRead|processQueryInformation, 0, uintptr(pid))
 	if h == 0 {
 		return err
@@ -384,6 +435,9 @@ func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[strin
 	for addr := uintptr(0); addr < maxUserAddress; {
 		if len(found) == len(targetSalts) {
 			return nil
+		}
+		if windowsKeyScanDeadlineExceeded(deadline) {
+			return errWindowsKeyScanDeadline
 		}
 		var m windowsMemoryBasicInformation
 		r, _, _ := procVirtualQueryEx.Call(h, addr, uintptr(unsafe.Pointer(&m)), unsafe.Sizeof(m))
@@ -396,7 +450,9 @@ func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[strin
 			return nil
 		}
 		if windowsReadableRegion(m) {
-			windowsScanRegion(h, m.BaseAddress, m.RegionSize, targetSalts, found)
+			if err := windowsScanRegion(h, m.BaseAddress, m.RegionSize, targetSalts, found, deadline); err != nil {
+				return err
+			}
 		}
 		addr = next
 	}
@@ -407,12 +463,15 @@ func windowsReadableRegion(m windowsMemoryBasicInformation) bool {
 	return m.State == memCommit && m.RegionSize > 0 && m.Protect&pageNoAccess == 0 && m.Protect&pageGuard == 0
 }
 
-func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[string]bool, found map[string]string) {
+func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[string]bool, found map[string]string, deadline time.Time) error {
 	const chunkSize = 4 << 20
 	var overlap []byte
 	for off := uintptr(0); off < size; {
 		if len(found) == len(targetSalts) {
-			return
+			return nil
+		}
+		if windowsKeyScanDeadlineExceeded(deadline) {
+			return errWindowsKeyScanDeadline
 		}
 		n := chunkSize
 		if remain := size - off; remain < uintptr(n) {
@@ -432,6 +491,7 @@ func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[stri
 		}
 		off += uintptr(n)
 	}
+	return nil
 }
 
 func scanRawKeyLiterals(data []byte, targetSalts map[string]bool, found map[string]string) int {

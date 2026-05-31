@@ -79,6 +79,10 @@ and built the cache. If you only want to start refresh in the background, add
 `-BackgroundRefresh`; in that mode `status=warming_cache` means the background
 process was launched, not that key extraction has already completed.
 
+Windows key scanning has a default timeout of 3 minutes. On very slow machines,
+set `WECHAT_CLI_KEY_SCAN_TIMEOUT=5m` for the current shell or user environment
+and rerun the installer.
+
 ## Install To D:\wechat-cli
 
 To install directly into `D:\wechat-cli`:
@@ -228,6 +232,15 @@ D:\wechat-cli\wechat-cli.exe cache refresh --force
 
 Check that `WECHAT_CLI_DB_ROOT` belongs to the same account currently logged in to
 Windows WeChat. If multiple WeChat processes exist, set `WECHAT_CLI_WECHAT_PID`.
+
+### Key scan timed out
+
+Keep Windows WeChat logged in, open one chat, then retry. On slow machines:
+
+```powershell
+$env:WECHAT_CLI_KEY_SCAN_TIMEOUT = "5m"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Json
+```
 
 ### DLL not found
 

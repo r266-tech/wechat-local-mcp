@@ -325,11 +325,18 @@ function Install-Components {
   $wx = $components.Wx
   if ($wx.Mode -eq "build") {
     Push-Location $wx.Path
+    $oldCgo = $env:CGO_ENABLED
     try {
-      Write-Log "go build -o $InstallDir\$AppName.exe ./cmd/wechat-cli"
+      $env:CGO_ENABLED = "0"
+      Write-Log "CGO_ENABLED=0 go build -o $InstallDir\$AppName.exe ./cmd/wechat-cli"
       & go build -o (Join-Path $InstallDir "$AppName.exe") ./cmd/wechat-cli 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
       if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
     } finally {
+      if ($null -eq $oldCgo) {
+        Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+      } else {
+        $env:CGO_ENABLED = $oldCgo
+      }
       Pop-Location
     }
   } else {
@@ -606,6 +613,9 @@ try {
   if ($message -match "no running Weixin.exe/WeChat.exe") {
     $blockedBy = "wechat_not_running"
     $nextAction = "Start Windows WeChat, finish login, open one chat, then rerun install.ps1 -All -Yes -Json."
+  } elseif ($message -match "Windows key scan timed out|key scan timed out|scan deadline exceeded|timed out after") {
+    $blockedBy = "key_scan_timeout"
+    $nextAction = "Keep Windows WeChat logged in, open one chat, then rerun install.ps1 -All -Yes -Json. Set WECHAT_CLI_KEY_SCAN_TIMEOUT=5m if this machine needs a longer scan."
   } elseif ($message -match "no usable Windows WeChat raw keys") {
     $blockedBy = "key_scan_failed"
     $nextAction = "Verify WECHAT_CLI_DB_ROOT belongs to the logged-in Windows WeChat account; if multiple WeChat processes exist, set WECHAT_CLI_WECHAT_PID and rerun install.ps1 -All -Yes -Json."

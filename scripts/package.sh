@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build a distribution zip: wechat-cli + wxkey binaries + local libWCDB.dylib +
 # install.sh + one-line bootstrap helper + docs. Friend/agent解压后跑
 # `./install.sh --all --yes --json` 即可完成 CLI 安装和 key/cache 初始化.
@@ -8,7 +8,7 @@
 # key 初始化. wechat-cli 运行时解密不要求关闭 SIP.
 set -euo pipefail
 
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.6.6}"
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRCDIR"
 
@@ -28,14 +28,14 @@ echo "→ building wechat-cli binary..."
 # -trimpath strips build-host absolute paths from the binary; -ldflags "-s -w"
 # strips symbol/debug tables so release binaries do not leak the build
 # environment (e.g. /Users/<dev>/... or Go module cache locations).
-go build -trimpath -ldflags="-s -w" -o "$DIST/wechat-cli" ./cmd/wechat-cli
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$DIST/wechat-cli" ./cmd/wechat-cli
 chmod +x "$DIST/wechat-cli"
 
 echo "→ building wxkey binary..."
 if [[ -d "$WXKEY_SRC" ]]; then
-  ( cd "$WXKEY_SRC" && go build -trimpath -ldflags="-s -w" -o "$DIST/wxkey" ./cmd/wxkey )
+  ( cd "$WXKEY_SRC" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$DIST/wxkey" ./cmd/wxkey )
 else
-  GOFLAGS="-trimpath -ldflags=-s -w" GOBIN="$DIST" go install "$WXKEY_GO_INSTALL"
+  CGO_ENABLED=0 GOFLAGS="-trimpath -ldflags=-s -w" GOBIN="$DIST" go install "$WXKEY_GO_INSTALL"
 fi
 chmod +x "$DIST/wxkey"
 

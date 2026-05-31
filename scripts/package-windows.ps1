@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.0.0",
+  [string]$Version = "1.6.6",
   [string]$WcdbLib = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_LIB)) { $env:WECHAT_CLI_WCDB_LIB } else { $env:WX_MCP_WCDB_LIB })
 )
 
@@ -93,8 +93,18 @@ $dist = Join-Path $distRoot "wechat-cli-v$Version-windows-amd64"
 if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-& go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wechat-cli
-if ($LASTEXITCODE -ne 0) { throw "go build failed" }
+$oldCgo = $env:CGO_ENABLED
+try {
+  $env:CGO_ENABLED = "0"
+  & go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wechat-cli
+  if ($LASTEXITCODE -ne 0) { throw "go build failed" }
+} finally {
+  if ($null -eq $oldCgo) {
+    Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+  } else {
+    $env:CGO_ENABLED = $oldCgo
+  }
+}
 
 Copy-Item -LiteralPath $WcdbLib -Destination (Join-Path $dist "libWCDB.dll") -Force
 Copy-Item README.md, llms.txt, LICENSE, SECURITY.md, THIRD_PARTY_NOTICES.md, AGENTS.md, mcp-server.json, install.ps1 -Destination $dist -Force

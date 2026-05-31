@@ -20,9 +20,13 @@ jobs:
       - run: go test ./...
       - name: Build wechat-cli (macOS)
         if: runner.os == 'macOS'
+        env:
+          CGO_ENABLED: "0"
         run: go build -trimpath -o wechat-cli ./cmd/wechat-cli
       - name: Build wechat-cli (Windows)
         if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: "0"
         run: go build -trimpath -o wechat-cli.exe ./cmd/wechat-cli
       - name: Parse PowerShell installers
         if: runner.os == 'Windows'

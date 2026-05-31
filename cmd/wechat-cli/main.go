@@ -2653,6 +2653,9 @@ func agentMediaPathsByFamily(r wcdb.Row, referenced bool, family, unreadableWarn
 }
 
 func agentMediaRefsFromPaths(r wcdb.Row, paths []string, referenced bool, family string) []map[string]any {
+	if family == "image" || family == "cover" {
+		paths = bestAgentImagePaths(r, paths, referenced, family)
+	}
 	out := make([]map[string]any, 0, len(paths))
 	for _, p := range paths {
 		if p == "" {
@@ -2673,6 +2676,115 @@ func agentMediaRefsFromPaths(r wcdb.Row, paths []string, referenced bool, family
 		out = append(out, compactMap(ref))
 	}
 	return out
+}
+
+type agentImagePathScore struct {
+	nonThumbnail int
+	area         int64
+	fileSize     int64
+	variantRank  int
+	order        int
+}
+
+func bestAgentImagePaths(r wcdb.Row, paths []string, referenced bool, family string) []string {
+	if len(paths) <= 1 {
+		return paths
+	}
+	bestIdx := -1
+	var bestScore agentImagePathScore
+	for i, p := range paths {
+		if p == "" {
+			continue
+		}
+		score := scoreAgentImagePath(p, agentMediaPathDetail(r, p, referenced, family), i)
+		if bestIdx < 0 || agentImageScoreBetter(score, bestScore) {
+			bestIdx = i
+			bestScore = score
+		}
+	}
+	if bestIdx < 0 {
+		return nil
+	}
+	return []string{paths[bestIdx]}
+}
+
+func scoreAgentImagePath(path string, detail map[string]any, order int) agentImagePathScore {
+	width := int64MapValue(detail, "width")
+	height := int64MapValue(detail, "height")
+	fileSize := firstNonZeroInt64(int64MapValue(detail, "file_size"), int64MapValue(detail, "decoded_file_size"))
+	variantRank := agentImagePathVariantRank(path)
+	nonThumbnail := 1
+	if variantRank == 0 {
+		nonThumbnail = 0
+	}
+	return agentImagePathScore{
+		nonThumbnail: nonThumbnail,
+		area:         width * height,
+		fileSize:     fileSize,
+		variantRank:  variantRank,
+		order:        order,
+	}
+}
+
+func agentImageScoreBetter(a, b agentImagePathScore) bool {
+	if a.nonThumbnail != b.nonThumbnail {
+		return a.nonThumbnail > b.nonThumbnail
+	}
+	if a.area != b.area {
+		return a.area > b.area
+	}
+	if a.fileSize != b.fileSize {
+		return a.fileSize > b.fileSize
+	}
+	if a.variantRank != b.variantRank {
+		return a.variantRank > b.variantRank
+	}
+	return a.order < b.order
+}
+
+func agentImagePathVariantRank(path string) int {
+	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if idx := strings.LastIndex(stem, "-"); idx > 0 && isHexString(stem[idx+1:]) && len(stem[idx+1:]) == 16 {
+		stem = stem[:idx]
+	}
+	stem = strings.ToLower(stem)
+	switch {
+	case strings.HasSuffix(stem, "_t"), strings.HasSuffix(stem, "_thumb"), strings.HasSuffix(stem, "-thumb"), strings.Contains(stem, "thumbnail"):
+		return 0
+	case strings.HasSuffix(stem, "_h"), strings.HasSuffix(stem, "_hd"), strings.HasSuffix(stem, "_o"), strings.HasSuffix(stem, "_origin"):
+		return 3
+	default:
+		return 2
+	}
+}
+
+func isHexString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func int64MapValue(m map[string]any, key string) int64 {
+	if m == nil {
+		return 0
+	}
+	n, _ := integerArgValue(m[key])
+	return n
+}
+
+func firstNonZeroInt64(vals ...int64) int64 {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
@@ -2700,12 +2812,30 @@ func agentMediaPathDetail(r wcdb.Row, path string, referenced bool, family strin
 			continue
 		}
 		for _, d := range mapSliceAny(h["local_path_details"]) {
-			if rowString(wcdb.Row(d), "path") == path || rowString(wcdb.Row(d), "uri") == localFileURI(path) {
+			if mediaPathDetailMatches(d, path) {
 				return d
 			}
 		}
 	}
 	return nil
+}
+
+func mediaPathDetailMatches(d map[string]any, path string) bool {
+	if path == "" {
+		return false
+	}
+	uri := localFileURI(path)
+	for _, key := range []string{"path", "decoded_path"} {
+		if rowString(wcdb.Row(d), key) == path {
+			return true
+		}
+	}
+	for _, key := range []string{"uri", "decoded_uri"} {
+		if rowString(wcdb.Row(d), key) == uri {
+			return true
+		}
+	}
+	return false
 }
 
 func agentFileName(r wcdb.Row, path string) string {
@@ -5028,22 +5158,25 @@ func quoteXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string]a
 }
 
 func forwardXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string]any {
-	if s == nil {
+	items, _ := p["forward_items"].([]wxparse.ForwardItem)
+	if s == nil || len(items) == 0 {
 		return nil
 	}
+	resourceHints := s.forwardResourceReadHints(items)
 	var hints []map[string]any
 	var walk func([]wxparse.ForwardItem, []int)
 	walk = func(items []wxparse.ForwardItem, prefix []int) {
 		for i, it := range items {
 			path := appendForwardPath(prefix, i)
 			if it.DataType == 2 {
-				if h := s.directImageReadHintByContentMD5(it.FullMD5, it.SrcMsgCreateTime); h != nil {
-					h["source"] = "message_forward_item"
-					h["message_role"] = "forward_item"
-					h["forward_path"] = forwardPathString(path)
-					h["resource_family"] = "image"
-					h["content_md5"] = strings.ToLower(strings.TrimSpace(it.FullMD5))
-					hints = append(hints, h)
+				pathKey := forwardPathString(path)
+				hints = append(hints, forwardHintsForKey(resourceHints, pathKey)...)
+				if !forwardHintHasReadableMedia(hints, pathKey, "image") {
+					if h := s.directImageReadHintByContentMD5(it.FullMD5, it.SrcMsgCreateTime); h != nil {
+						markForwardItemHint(h, pathKey, "image")
+						h["content_md5"] = strings.ToLower(strings.TrimSpace(it.FullMD5))
+						hints = append(hints, h)
+					}
 				}
 			}
 			if len(it.NestedItems) > 0 {
@@ -5051,11 +5184,173 @@ func forwardXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string
 			}
 		}
 	}
-	switch items := p["forward_items"].(type) {
-	case []wxparse.ForwardItem:
-		walk(items, nil)
-	}
+	walk(items, nil)
 	return hints
+}
+
+func markForwardItemHint(h map[string]any, pathKey, family string) {
+	h["source"] = "message_forward_item"
+	h["message_role"] = "forward_item"
+	h["forward_path"] = pathKey
+	if family != "" {
+		h["resource_family"] = family
+	}
+}
+
+func forwardHintsForKey(hints map[string][]map[string]any, pathKey string) []map[string]any {
+	if len(hints) == 0 {
+		return nil
+	}
+	return hints[pathKey]
+}
+
+func forwardHintHasReadableMedia(hints []map[string]any, pathKey, family string) bool {
+	for _, h := range hints {
+		if rowString(wcdb.Row(h), "source") != "message_forward_item" || rowString(wcdb.Row(h), "forward_path") != pathKey || !agentHintMatchesFamily(h, family) {
+			continue
+		}
+		if len(stringSliceAny(h["direct_readable_local_paths"])) > 0 || len(stringSliceAny(h["decoded_local_paths"])) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+type forwardResourceLookup struct {
+	path     string
+	serverID int64
+}
+
+func (s *server) forwardResourceReadHints(items []wxparse.ForwardItem) map[string][]map[string]any {
+	if s == nil || len(items) == 0 {
+		return nil
+	}
+	lookups := collectForwardResourceLookups(items)
+	if len(lookups) == 0 {
+		return nil
+	}
+	byServerID := map[int64][]string{}
+	var serverIDs []int64
+	for _, lookup := range lookups {
+		if lookup.serverID == 0 || lookup.path == "" {
+			continue
+		}
+		if len(byServerID[lookup.serverID]) == 0 {
+			serverIDs = append(serverIDs, lookup.serverID)
+		}
+		byServerID[lookup.serverID] = appendUniqueStrings(byServerID[lookup.serverID], lookup.path)
+	}
+	serverIDs = uniqueInt64s(serverIDs)
+	if len(serverIDs) == 0 {
+		return nil
+	}
+	db, err := s.openDB("message", "message_resource.db")
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	out := map[string][]map[string]any{}
+	for start := 0; start < len(serverIDs); start += 200 {
+		end := start + 200
+		if end > len(serverIDs) {
+			end = len(serverIDs)
+		}
+		chunk := serverIDs[start:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk))
+		for i, id := range chunk {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := db.Query(fmt.Sprintf(`SELECT c.user_name AS talker, i.message_local_type, i.message_create_time,
+			i.message_local_id, i.message_svr_id, i.message_origin_source, i.packed_info AS message_packed_info,
+			d.resource_id, d.type AS resource_type_raw, d.size AS resource_size,
+			d.create_time AS resource_create_time, d.access_time AS resource_access_time,
+			d.status AS resource_status, d.data_index AS resource_data_index,
+			d.packed_info AS resource_packed_info
+			FROM MessageResourceInfo i
+			LEFT JOIN ChatName2Id c ON c.rowid = i.chat_id
+			JOIN MessageResourceDetail d ON d.message_id = i.message_id
+			WHERE i.message_svr_id IN (%s)
+			ORDER BY i.message_create_time DESC, i.message_local_id DESC, d.resource_id ASC`, strings.Join(ph, ",")), args...)
+		if err != nil {
+			continue
+		}
+		var resources []map[string]any
+		for _, r := range rows {
+			res := s.mediaResourceFromRow(r, true)
+			res["source_server_id"] = rowInt64(r, "message_svr_id")
+			resources = append(resources, res)
+		}
+		for pathKey, hints := range forwardHintsFromResources(resources, byServerID) {
+			out[pathKey] = append(out[pathKey], hints...)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func forwardHintsFromResources(resources []map[string]any, pathsByServerID map[int64][]string) map[string][]map[string]any {
+	if len(resources) == 0 || len(pathsByServerID) == 0 {
+		return nil
+	}
+	grouped := map[int64][]map[string]any{}
+	for _, res := range resources {
+		serverID := rowInt64(wcdb.Row(res), "source_server_id")
+		if serverID == 0 {
+			continue
+		}
+		grouped[serverID] = append(grouped[serverID], res)
+	}
+	out := map[string][]map[string]any{}
+	for serverID, serverResources := range grouped {
+		_, _, hints := mediaResourceReadHints(serverResources)
+		if len(hints) == 0 {
+			continue
+		}
+		for _, pathKey := range pathsByServerID[serverID] {
+			for _, h := range hints {
+				copyHint := copyMap(h)
+				markForwardItemHint(copyHint, pathKey, rowString(wcdb.Row(copyHint), "resource_family"))
+				copyHint["source_server_id_str"] = strconv.FormatInt(serverID, 10)
+				out[pathKey] = append(out[pathKey], copyHint)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func collectForwardResourceLookups(items []wxparse.ForwardItem) []forwardResourceLookup {
+	var out []forwardResourceLookup
+	var walk func([]wxparse.ForwardItem, []int)
+	walk = func(items []wxparse.ForwardItem, prefix []int) {
+		for i, it := range items {
+			path := appendForwardPath(prefix, i)
+			if it.DataType == 2 || it.DataType == 4 || it.DataType == 8 {
+				if serverID, err := strconv.ParseInt(strings.TrimSpace(it.FromNewMsgID), 10, 64); err == nil && serverID != 0 {
+					out = append(out, forwardResourceLookup{path: forwardPathString(path), serverID: serverID})
+				}
+			}
+			if len(it.NestedItems) > 0 {
+				walk(it.NestedItems, path)
+			}
+		}
+	}
+	walk(items, nil)
+	return out
+}
+
+func copyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *server) directImageReadHintByContentMD5(contentMD5 string, createTime int64) map[string]any {
@@ -7081,12 +7376,12 @@ func parseTS(s string) (int64, error) {
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return n, nil
 	}
-	for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05"} {
+	for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
 		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
 			return t.Unix(), nil
 		}
 	}
-	return 0, fmt.Errorf("无法解析时间: %s (支持 unix秒 / 2006-01-02 / 2006-01-02T15:04:05, 本地时区)", s)
+	return 0, fmt.Errorf("无法解析时间: %s (支持 unix秒 / 2006-01-02 / 2006-01-02T15:04:05 / 2006-01-02 15:04:05, 本地时区)", s)
 }
 
 // ──────────────────── zstd / field decode ────────────────────

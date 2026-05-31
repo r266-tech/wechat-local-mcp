@@ -1246,20 +1246,37 @@ func (s *server) toolExportMessages(a map[string]any) (any, error) {
 	if format == "" {
 		format = "jsonl"
 	}
+	view, err := exportMessagesView(a)
+	if err != nil {
+		return nil, err
+	}
 	if firstNonEmpty(getStr(a, "talker"), getStr(a, "chat")) == "" {
 		return nil, fmt.Errorf("export_messages requires chat or talker; wechat-cli does not keep a global message cache")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	count, err := s.writeLiveExportMessages(a, path, format)
+	count, err := s.writeLiveExportMessages(a, path, format, view)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": path, "format": format, "count": count, "live": true}, nil
+	return map[string]any{"path": path, "format": format, "view": view, "count": count, "live": true}, nil
 }
 
-func (s *server) writeLiveExportMessages(a map[string]any, path, format string) (int, error) {
+func exportMessagesView(a map[string]any) (string, error) {
+	view := strings.TrimSpace(strings.ToLower(getStr(a, "view")))
+	if view == "" || view == "default" {
+		return "agent", nil
+	}
+	switch view {
+	case "agent", "raw":
+		return view, nil
+	default:
+		return "", fmt.Errorf("invalid view=%q: must be \"agent\" or \"raw\"", getStr(a, "view"))
+	}
+}
+
+func (s *server) writeLiveExportMessages(a map[string]any, path, format, view string) (int, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, err
@@ -1303,10 +1320,27 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format string) 
 		if len(rows) == 0 {
 			break
 		}
-		for _, r := range rows {
+		var agentRows []map[string]any
+		if view == "agent" {
+			if includeMediaPathsForMessages(batchArgs) {
+				if err := s.enrichMessageMediaResources(rows); err != nil {
+					return written, err
+				}
+			}
+			agentRows = agentMessages(rows, includeDebugOutput(batchArgs))
+		}
+		for i, r := range rows {
+			var agentRow map[string]any
+			if i < len(agentRows) {
+				agentRow = agentRows[i]
+			}
 			switch format {
 			case "jsonl":
-				j, _ := json.Marshal(r)
+				payload := any(r)
+				if view == "agent" {
+					payload = agentRow
+				}
+				j, _ := json.Marshal(payload)
 				if _, err := w.Write(j); err != nil {
 					return written, err
 				}
@@ -1314,11 +1348,19 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format string) 
 					return written, err
 				}
 			case "markdown":
-				if _, err := w.WriteString(renderMessageMarkdown(r)); err != nil {
+				text := renderMessageMarkdown(r)
+				if view == "agent" {
+					text = renderAgentMessageMarkdown(agentRow)
+				}
+				if _, err := w.WriteString(text); err != nil {
 					return written, err
 				}
 			case "html":
-				if _, err := w.WriteString(renderMessageHTMLSection(r)); err != nil {
+				text := renderMessageHTMLSection(r)
+				if view == "agent" {
+					text = renderAgentMessageHTMLSection(agentRow)
+				}
+				if _, err := w.WriteString(text); err != nil {
 					return written, err
 				}
 			}
@@ -1337,6 +1379,56 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format string) 
 		return written, err
 	}
 	return written, nil
+}
+
+func renderAgentMessageMarkdown(m map[string]any) string {
+	var b strings.Builder
+	b.WriteString("### ")
+	b.WriteString(stringMapValue(m, "time"))
+	if sender := stringMapValue(m, "sender"); sender != "" {
+		b.WriteString(" / ")
+		b.WriteString(sender)
+	}
+	b.WriteString("\n\n")
+	text := stringMapValue(m, "text")
+	if text == "" {
+		text = stringMapValue(m, "kind")
+	}
+	b.WriteString(text)
+	for _, img := range mapSliceAny(m["images"]) {
+		if path := stringMapValue(img, "path"); path != "" {
+			b.WriteString("\n\n- image: ")
+			b.WriteString(path)
+		}
+	}
+	b.WriteString("\n\n")
+	return b.String()
+}
+
+func renderAgentMessageHTMLSection(m map[string]any) string {
+	var b strings.Builder
+	b.WriteString("<section><h3>")
+	b.WriteString(html.EscapeString(stringMapValue(m, "time")))
+	if sender := stringMapValue(m, "sender"); sender != "" {
+		b.WriteString(" / ")
+		b.WriteString(html.EscapeString(sender))
+	}
+	b.WriteString("</h3><p>")
+	text := stringMapValue(m, "text")
+	if text == "" {
+		text = stringMapValue(m, "kind")
+	}
+	b.WriteString(html.EscapeString(text))
+	b.WriteString("</p>")
+	for _, img := range mapSliceAny(m["images"]) {
+		if path := stringMapValue(img, "path"); path != "" {
+			b.WriteString("<p>image: ")
+			b.WriteString(html.EscapeString(path))
+			b.WriteString("</p>")
+		}
+	}
+	b.WriteString("</section>")
+	return b.String()
 }
 
 func fieldsMode(a map[string]any) (string, error) {

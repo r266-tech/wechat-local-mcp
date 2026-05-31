@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/bin/zsh
 set -u
 
 APP_NAME="wechat-cli"
@@ -565,16 +565,16 @@ install_components() {
   mkdir -p "$INSTALL_DIR"
 
   if [[ "$CLI_MODE" == "build" ]]; then
-    run_logged_in "$CLI_SOURCE" go build -o "$INSTALL_DIR/$APP_NAME" ./cmd/wechat-cli || die "build $APP_NAME failed; see $INSTALL_LOG" 1
+    run_logged_in "$CLI_SOURCE" env CGO_ENABLED=0 go build -o "$INSTALL_DIR/$APP_NAME" ./cmd/wechat-cli || die "build $APP_NAME failed; see $INSTALL_LOG" 1
   else
     cp "$CLI_SOURCE" "$INSTALL_DIR/$APP_NAME" || die "copy $APP_NAME failed" 1
   fi
   chmod +x "$INSTALL_DIR/$APP_NAME"
 
   if [[ "$WXKEY_MODE" == "build" ]]; then
-    run_logged_in "$WXKEY_SOURCE" go build -o "$INSTALL_DIR/wxkey" ./cmd/wxkey || die "build wxkey failed; see $INSTALL_LOG" 1
+    run_logged_in "$WXKEY_SOURCE" env CGO_ENABLED=0 go build -o "$INSTALL_DIR/wxkey" ./cmd/wxkey || die "build wxkey failed; see $INSTALL_LOG" 1
   elif [[ "$WXKEY_MODE" == "go-install" ]]; then
-    run_logged env GOBIN="$INSTALL_DIR" go install "$WXKEY_SOURCE" || die "install wxkey from GitHub failed; see $INSTALL_LOG" 1
+    run_logged env CGO_ENABLED=0 GOBIN="$INSTALL_DIR" go install "$WXKEY_SOURCE" || die "install wxkey from GitHub failed; see $INSTALL_LOG" 1
   else
     cp "$WXKEY_SOURCE" "$INSTALL_DIR/wxkey" || die "copy wxkey failed" 1
   fi
@@ -700,6 +700,10 @@ classify_install_log_blocker() {
     text="$(tail -120 "$INSTALL_LOG" 2>/dev/null)"
   fi
   case "$text" in
+    *"sudo password prompt cancelled or failed"*|*"prepare stored sudo credential"*|*"empty sudo password"*)
+      BLOCKED_BY="desktop_password_prompt_required"
+      NEXT_ACTION="Open a local Mac desktop session and run $INSTALL_DIR/wxkey bootstrap (no sudo). Enter the admin password in the hidden wechat-cli prompt, then rerun install."
+      ;;
     *"WeChat is not ready yet"*|*"WeChat process not running"*|*"no WeChat 4.x account directory"*)
       BLOCKED_BY="wechat_not_ready"
       NEXT_ACTION="Open WeChat, finish login, open one chat, then rerun ./install.sh --bootstrap --refresh --yes --json."
@@ -741,7 +745,7 @@ run_bootstrap() {
     fi
     INSTALL_STATUS="blocked"
     classify_install_log_blocker
-    die "wxkey bootstrap failed; see $INSTALL_LOG. If install.sh was run through an AI agent or non-interactive shell, the macOS password prompt cannot surface — re-run \`$INSTALL_DIR/wxkey bootstrap\` directly on the Mac's desktop (no sudo)." 1
+    die "wxkey bootstrap failed; see $INSTALL_LOG. If the macOS password prompt did not appear, open a local Mac desktop session and re-run \`$INSTALL_DIR/wxkey bootstrap\` directly (no sudo)." 1
   fi
   BOOTSTRAP_RAN=1
 }

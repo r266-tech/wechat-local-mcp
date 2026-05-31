@@ -7,10 +7,12 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +43,17 @@ func TestParseTS_DateOnly(t *testing.T) {
 
 func TestParseTS_DateTime(t *testing.T) {
 	got, err := parseTS("2026-04-16T12:30:45")
+	if err != nil {
+		t.Fatalf("parseTS error: %v", err)
+	}
+	want := time.Date(2026, 4, 16, 12, 30, 45, 0, time.Local).Unix()
+	if got != want {
+		t.Errorf("parseTS = %d, want %d", got, want)
+	}
+}
+
+func TestParseTS_DateTimeWithSpace(t *testing.T) {
+	got, err := parseTS("2026-04-16 12:30:45")
 	if err != nil {
 		t.Fatalf("parseTS error: %v", err)
 	}
@@ -101,6 +114,150 @@ func TestCLIHelpIsDefaultAndMCPIsExplicit(t *testing.T) {
 	}
 }
 
+func TestParseGlobalCLIOptions(t *testing.T) {
+	opts, args, err := parseGlobalCLIOptions([]string{"--json", "--pretty", "resolve-chat", "张三", "--compact=false"})
+	if err != nil {
+		t.Fatalf("parseGlobalCLIOptions error: %v", err)
+	}
+	if !opts.Pretty {
+		t.Fatalf("Pretty = false, want true")
+	}
+	if strings.Join(args, "\x00") != strings.Join([]string{"resolve-chat", "张三"}, "\x00") {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestParseGlobalCLIOptionsCompactWins(t *testing.T) {
+	opts, args, err := parseGlobalCLIOptions([]string{"--pretty", "--compact", "sessions"})
+	if err != nil {
+		t.Fatalf("parseGlobalCLIOptions error: %v", err)
+	}
+	if opts.Pretty {
+		t.Fatalf("Pretty = true, want false")
+	}
+	if len(args) != 1 || args[0] != "sessions" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestCLIHelpDocumentForCommand(t *testing.T) {
+	raw := cliHelpDocument("timeline")
+	doc, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("help doc type = %T", raw)
+	}
+	cmd, ok := doc["command"].(cliCommandSpec)
+	if !ok || cmd.Tool != "chat_timeline" {
+		t.Fatalf("command spec = %#v", doc["command"])
+	}
+	td, ok := doc["tool"].(toolDef)
+	if !ok || td.Name != "chat_timeline" {
+		t.Fatalf("tool def = %#v", doc["tool"])
+	}
+}
+
+func TestToolSchemaEnvelopeIdentifiesCommand(t *testing.T) {
+	var buf bytes.Buffer
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	runToolSchemaCLI([]string{"timeline"}, cliOptions{})
+	_ = w.Close()
+	os.Stdout = old
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	var env cliSuccessEnvelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("tool-schema output is not success envelope: %v\n%s", err, buf.String())
+	}
+	if !env.OK || env.Tool != "tool_schema" || env.Command != "tool-schema" {
+		t.Fatalf("tool-schema envelope = %#v", env)
+	}
+	doc, ok := env.Data.(map[string]any)
+	if !ok || doc["agent"] == nil || doc["command"] == nil || doc["tool"] == nil {
+		t.Fatalf("tool-schema data = %#v", env.Data)
+	}
+}
+
+func TestCLIHelpDocumentUnknownTarget(t *testing.T) {
+	raw := cliHelpDocument("nope")
+	env, ok := raw.(cliErrorEnvelope)
+	if !ok {
+		t.Fatalf("unknown help doc type = %T", raw)
+	}
+	if env.OK || env.Error.Code != "unknown_help_target" {
+		t.Fatalf("unknown help env = %#v", env)
+	}
+}
+
+func TestWriteJSONCLICompactByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	writeJSONCLI(map[string]any{"ok": true}, cliOptions{})
+	_ = w.Close()
+	os.Stdout = old
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if got != "{\"ok\":true}\n" {
+		t.Fatalf("compact JSON = %q", got)
+	}
+}
+
+func TestCLIAgentDataEnvelopeWrapsSearchRows(t *testing.T) {
+	rows := []wcdb.Row{{
+		"local_id":            int64(26),
+		"talker":              "room@chatroom",
+		"create_time":         int64(1779443475),
+		"sender_wxid":         "wxid_bob",
+		"sender_display_name": "Bob",
+		"kind_name":           "solitaire",
+		"content_summary":     "测试群接龙",
+		"content":             "#接龙\n测试群接龙",
+	}}
+
+	data := cliAgentDataEnvelope("search", "search", map[string]any{"keyword": "测试", "limit": int64(10)}, rows)
+	env, ok := data.(map[string]any)
+	if !ok {
+		t.Fatalf("data = %T, want map", data)
+	}
+	query, ok := env["query"].(map[string]any)
+	if !ok || query["keyword"] != "测试" || query["returned"] != 1 || query["has_more"] != false {
+		t.Fatalf("query = %#v", env["query"])
+	}
+	messages, ok := env["messages"].([]map[string]any)
+	if !ok || len(messages) != 1 || messages[0]["kind"] != "solitaire" || messages[0]["text"] != "测试群接龙" || messages[0]["match"] != "#接龙\n测试群接龙" {
+		t.Fatalf("messages = %#v", env["messages"])
+	}
+	id, ok := messages[0]["id"].(map[string]any)
+	if !ok || id["local_id"] != int64(26) || id["talker"] != "room@chatroom" {
+		t.Fatalf("id = %#v", messages[0]["id"])
+	}
+}
+
+func TestCLIErrorCodeMapping(t *testing.T) {
+	cases := map[string]string{
+		`missing required argument "keyword" for tool search`: "missing_required_argument",
+		`unknown argument "json" for tool resolve_chat`:       "unknown_argument",
+		`invalid argument "limit" for tool sessions`:          "invalid_argument",
+	}
+	for msg, want := range cases {
+		if got := cliErrorCode(errors.New(msg)); got != want {
+			t.Fatalf("cliErrorCode(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
+
 func TestCLIToolCoverage(t *testing.T) {
 	missing := map[string]bool{}
 	for _, td := range toolDefs {
@@ -111,6 +268,17 @@ func TestCLIToolCoverage(t *testing.T) {
 	}
 	if len(missing) > 0 {
 		t.Fatalf("CLI does not cover tools: %#v", missing)
+	}
+}
+
+func TestCLICommandSpecsHaveAgentExamples(t *testing.T) {
+	for _, spec := range cliCommandSpecs {
+		if spec.Command == "serve-mcp" {
+			continue
+		}
+		if len(spec.Examples) == 0 {
+			t.Fatalf("command %q has no agent examples", spec.Command)
+		}
 	}
 }
 
@@ -1155,6 +1323,135 @@ func TestAgentForwardChatWarnsWhenNestedMediaUnresolved(t *testing.T) {
 	warnings := stringSliceAny(items[0]["warnings"])
 	if len(warnings) != 1 || warnings[0] != "forward_image_not_resolved" {
 		t.Fatalf("forward item warnings = %#v", items[0]["warnings"])
+	}
+}
+
+func TestForwardResourceReadHintsResolveImageBySourceServerID(t *testing.T) {
+	root := t.TempDir()
+	srv := &server{cfg: &config.Config{DBRoot: root}}
+	sourceTalker := "source@chatroom"
+	serverID := int64(2369251559671996886)
+	ts := time.Date(2026, 5, 22, 16, 44, 13, 0, time.Local).Unix()
+	imageBytes := tinyPNG()
+	resourceMD5 := "cb2f09a6a1eba3b08ab1edbf2a209052"
+	direct := filepath.Join(root, "temp", "InputTemp", "forward.png")
+	if err := os.MkdirAll(filepath.Dir(direct), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(direct, imageBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dat := filepath.Join(root, "msg", "attach", talkerHash(sourceTalker), "2026-05", "Img", resourceMD5+".dat")
+	if err := os.MkdirAll(filepath.Dir(dat), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dat, []byte("encrypted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resources := []map[string]any{{
+		"source_server_id":  serverID,
+		"resource_family":   "image",
+		"resource_id":       int64(269107),
+		"resource_type_raw": int64(65537),
+		"local_paths":       srv.localMediaPaths(sourceTalker, ts, "image", resourceMD5, nil),
+	}}
+	contentSum := md5.Sum(imageBytes)
+	srv.attachReadableImageMatchesByContentMD5(resources[0], ts, hex.EncodeToString(contentSum[:]))
+
+	hintsByPath := forwardHintsFromResources(resources, map[int64][]string{serverID: {"0"}})
+	hints := hintsByPath["0"]
+	if len(hints) != 1 {
+		t.Fatalf("forward resource hints = %#v, want one hint", hintsByPath)
+	}
+	if hints[0]["source"] != "message_forward_item" || hints[0]["forward_path"] != "0" || hints[0]["source_server_id_str"] != strconv.FormatInt(serverID, 10) {
+		t.Fatalf("forward hint metadata = %#v", hints[0])
+	}
+	directPaths := stringSliceAny(hints[0]["direct_readable_local_paths"])
+	if len(directPaths) != 1 || directPaths[0] != direct {
+		t.Fatalf("direct paths = %#v, want [%q]", directPaths, direct)
+	}
+	refs := forwardMediaRefsFromHints([]int{0}, hints, "image")
+	if len(refs) != 1 || refs[0]["path"] != direct {
+		t.Fatalf("forward media refs = %#v, want direct path", refs)
+	}
+}
+
+func TestAgentImageRefsPreferOriginalOverThumbnail(t *testing.T) {
+	row := wcdb.Row{
+		"kind_name": "image",
+		"media_read_hints": []map[string]any{{
+			"source":                      "message_resource",
+			"address_type":                "local_file",
+			"resource_family":             "image",
+			"direct_readable_local_paths": []string{"/tmp/sample_t.jpg", "/tmp/sample_h.png"},
+			"local_path_details": []map[string]any{{
+				"path":      "/tmp/sample_t.jpg",
+				"file_size": int64(1000),
+				"width":     180,
+				"height":    102,
+			}, {
+				"path":      "/tmp/sample_h.png",
+				"file_size": int64(100),
+				"width":     790,
+				"height":    202,
+			}},
+		}},
+	}
+
+	images, warnings := agentImageRefs(row, false)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if len(images) != 1 || images[0]["path"] != "/tmp/sample_h.png" {
+		t.Fatalf("images = %#v, want high/original path only", images)
+	}
+}
+
+func TestAgentImageRefsFallsBackToThumbnailWhenOnlyThumbnailExists(t *testing.T) {
+	row := wcdb.Row{
+		"kind_name": "image",
+		"media_read_hints": []map[string]any{{
+			"source":                      "message_resource",
+			"address_type":                "local_file",
+			"resource_family":             "image",
+			"direct_readable_local_paths": []string{"/tmp/sample_t.jpg"},
+			"local_path_details": []map[string]any{{
+				"path":   "/tmp/sample_t.jpg",
+				"width":  180,
+				"height": 102,
+			}},
+		}},
+	}
+
+	images, warnings := agentImageRefs(row, false)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if len(images) != 1 || images[0]["path"] != "/tmp/sample_t.jpg" {
+		t.Fatalf("images = %#v, want thumbnail fallback", images)
+	}
+}
+
+func TestForwardImageRefsPreferOriginalOverThumbnail(t *testing.T) {
+	hints := []map[string]any{{
+		"source":                      "message_forward_item",
+		"forward_path":                "0",
+		"resource_family":             "image",
+		"direct_readable_local_paths": []string{"/tmp/forward_t.jpg", "/tmp/forward.png"},
+		"local_path_details": []map[string]any{{
+			"path":   "/tmp/forward_t.jpg",
+			"width":  180,
+			"height": 102,
+		}, {
+			"path":   "/tmp/forward.png",
+			"width":  790,
+			"height": 202,
+		}},
+	}}
+
+	refs := forwardMediaRefsFromHints([]int{0}, hints, "image")
+	if len(refs) != 1 || refs[0]["path"] != "/tmp/forward.png" {
+		t.Fatalf("forward refs = %#v, want original/high path only", refs)
 	}
 }
 

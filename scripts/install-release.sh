@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/bin/zsh
 set -euo pipefail
 
 REPO="${WECHAT_CLI_REPO:-${WX_MCP_REPO:-https://github.com/r266-tech/wechat-cli}}"

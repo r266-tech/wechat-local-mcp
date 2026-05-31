@@ -26,6 +26,7 @@ Runtime:
 - State/cache dir: `~/.wechat-cli`
 - Key config remains wxkey-compatible at `~/.config/wxcli/config.json`
 - Preferred env prefix: `WECHAT_CLI_*`; legacy `WX_MCP_*` aliases still work
+- Windows key scan defaults to 3 minutes; use `WECHAT_CLI_KEY_SCAN_TIMEOUT=5m` on slow machines.
 
 Release assets:
 - macOS stable: `wechat-cli-latest-darwin-arm64.zip`

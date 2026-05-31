@@ -67,6 +67,8 @@ Release zip contents:
   `wxkey bootstrap` has stored the sudo credential and written a schema-2 key map.
 - Windows first key setup is built into `wechat-cli.exe cache refresh --force`.
   Keep Windows WeChat logged in and open at least one chat first.
+  Windows key scan defaults to a 3-minute timeout; set
+  `WECHAT_CLI_KEY_SCAN_TIMEOUT=5m` only on slow machines that need longer.
 - `libWCDB.dylib` must be present beside `wechat-cli` on macOS; `libWCDB.dll`
   must be present beside `wechat-cli.exe` on Windows.
 - Install dir defaults: `~/.local/share/wechat-cli` on macOS and

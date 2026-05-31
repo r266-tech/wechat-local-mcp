@@ -2,7 +2,10 @@
 
 package wxkey
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestScanRawKeyLiteralsFindsTargetSalt(t *testing.T) {
 	key := "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -29,5 +32,25 @@ func TestScanRawKeyLiteralsIgnoresNonTargetSalt(t *testing.T) {
 	}
 	if len(found) != 0 {
 		t.Fatalf("found = %v, want empty", found)
+	}
+}
+
+func TestWindowsKeyScanTimeoutEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "duration", value: "1500ms", want: 1500 * time.Millisecond},
+		{name: "seconds", value: "7", want: 7 * time.Second},
+		{name: "disabled", value: "-1", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("WECHAT_CLI_KEY_SCAN_TIMEOUT", tt.value)
+			if got := windowsKeyScanTimeout(); got != tt.want {
+				t.Fatalf("windowsKeyScanTimeout = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
